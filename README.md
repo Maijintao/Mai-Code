@@ -1,4 +1,4 @@
-# MaiCode
+# Mai-Code
 
 一个从零实现的、类 Claude Code 的**本地 AI Agent 运行时（mini 版）**。
 

@@ -4,15 +4,15 @@ import asyncio
 import json
 import logging
 import time
+from pathlib import Path
 from typing import Any
 
-log = logging.getLogger(__name__)
-
 from rich.markdown import Markdown
+from rich.text import Text
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.message import Message
 from textual.widget import Widget
@@ -21,6 +21,195 @@ from textual.widgets import Label, Static, TextArea
 from mai_code.core.config import MaiConfig
 from mai_code.core.skills.loader import SkillLoader
 from mai_code.core.transport.socket_client import IpcError, SocketClient
+
+log = logging.getLogger(__name__)
+
+
+# 天秤座欢迎态 13×8：整格厚块造型（抗半块字符缝隙），左右完全对称
+# 梁/托盘/底座全部 2 像素厚，仅在轮廓边缘用半格收圆角；S 为阴影色
+_PIXEL_MASCOT_GRID = (
+    "..LLLLLLLLL..",
+    "..BBBBBBBBB..",
+    "..D...D...D..",
+    "..D...D...D..",
+    "BBBBB.L.BBBBB",
+    ".SSS..D..SSS.",
+    "...DDDDDDD...",
+    "..SSSSSSSSS..",
+)
+_PIXEL_MASCOT_COLORS = {
+    "D": "#155e75",
+    "S": "#0c4a6e",
+    "B": "#38bdf8",
+    "L": "#e0f2fe",
+}
+
+
+# 用半块字符填满终端单元，让天秤线条连续不出现断层
+def _pixel_mascot() -> Text:
+    mascot = Text()
+    background = "#070b14"
+    for row_index in range(0, len(_PIXEL_MASCOT_GRID), 2):
+        if row_index:
+            mascot.append("\n")
+        top = _PIXEL_MASCOT_GRID[row_index]
+        bottom = _PIXEL_MASCOT_GRID[row_index + 1] if row_index + 1 < len(_PIXEL_MASCOT_GRID) else "." * len(top)
+        for upper, lower in zip(top, bottom, strict=True):
+            if upper == lower == ".":
+                mascot.append(" ")
+                continue
+            foreground = _PIXEL_MASCOT_COLORS.get(upper, background)
+            backdrop = _PIXEL_MASCOT_COLORS.get(lower, background)
+            mascot.append("▀", style=f"{foreground} on {backdrop}")
+    return mascot
+
+
+# Minecraft 风格像素标题：冷白正面 + 克制蓝色右下挤出层
+_PIXEL_TITLE_FACE = "#eef3fb"
+_PIXEL_TITLE_DEPTH = "#5f7fae"
+_PIXEL_TITLE_GLYPHS = {
+    "M": ["█...█", "██.██", "█.█.█", "█...█", "█...█"],
+    "A": ["..█..", ".█.█.", "█...█", "█████", "█...█"],
+    "I": ["███", ".█.", ".█.", ".█.", "███"],
+    "-": ["....", "....", "████", "....", "...."],
+    "C": [".███.", "█...█", "█....", "█...█", ".███."],
+    "O": [".███.", "█...█", "█...█", "█...█", ".███."],
+    "D": ["████.", "█...█", "█...█", "█...█", "████."],
+    "E": ["█████", "█....", "████.", "█....", "█████"],
+}
+
+
+# 用方块字符逐格拼出 MAI-CODE 立体标题，先铺阴影层再叠正面
+def _pixel_title(text: str = "MAI-CODE") -> Text:
+    height = 5
+    placements, cursor = [], 0
+    for ch in text:
+        glyph = _PIXEL_TITLE_GLYPHS[ch]
+        placements.append((cursor, glyph))
+        cursor += len(glyph[0]) + 1
+    width = cursor - 1
+    canvas: list[list[str | None]] = [[None] * (width + 1) for _ in range(height + 1)]
+    for dx, dy in ((1, 1), (1, 0)):
+        for gx, glyph in placements:
+            for ry, row in enumerate(glyph):
+                for rx, cell in enumerate(row):
+                    if cell == "█" and canvas[ry + dy][gx + rx + dx] is None:
+                        canvas[ry + dy][gx + rx + dx] = _PIXEL_TITLE_DEPTH
+    for gx, glyph in placements:
+        for ry, row in enumerate(glyph):
+            for rx, cell in enumerate(row):
+                if cell == "█":
+                    canvas[ry][gx + rx] = _PIXEL_TITLE_FACE
+    title = Text()
+    for row_index, row in enumerate(canvas):
+        if row_index:
+            title.append("\n")
+        for cell in row:
+            title.append("█" if cell else " ", style=cell or "")
+    return title
+
+
+# 欢迎面板：对齐 Claude Code 欢迎页排版（左右分栏 + 中缝分割线，宠物暂缺）
+class WelcomePanel(Static):
+    DEFAULT_CSS = """
+    WelcomePanel {
+        width: 1fr;
+        height: 1fr;
+        padding: 0;
+        align: center middle;
+        color: #e6ebf3;
+    }
+    WelcomePanel #welcome-frame {
+        width: 100%;
+        max-width: 84;
+        height: 16;
+        border: round #4d83e8;
+        background: #070b14;
+        padding: 0 2 1 2;
+    }
+    WelcomePanel #pixel-title {
+        width: 1fr;
+        height: 6;
+        margin-bottom: 0;
+        content-align: center middle;
+    }
+    WelcomePanel #welcome-body {
+        width: 1fr;
+        height: 10;
+    }
+    WelcomePanel #intro {
+        width: 38%;
+        height: 1fr;
+        padding: 0 2 0 1;
+        border-right: solid #315da9;
+        content-align: center top;
+        align: center top;
+    }
+    WelcomePanel #welcome-heading {
+        width: 100%;
+        height: 1;
+        color: #eef3fb;
+        text-style: bold;
+        text-align: center;
+    }
+    WelcomePanel #pet {
+        width: 100%;
+        height: 4;
+        content-align: center top;
+    }
+    WelcomePanel #details {
+        width: 1fr;
+        height: auto;
+        padding: 0 0 0 2;
+    }
+    WelcomePanel .tip {
+        height: 1;
+        color: #e6ebf3;
+    }
+    WelcomePanel .activity-rule {
+        margin-top: 1;
+        color: #566074;
+    }
+    WelcomePanel .activity-empty {
+        color: #8f9bad;
+    }
+    WelcomePanel #welcome-meta {
+        display: none;
+    }
+    WelcomePanel .meta {
+        height: 1;
+        color: #8993a7;
+    }
+    """
+
+    # 组合欢迎卡片：像素标题居中，左栏标题区（带右分割线），右栏提示与最近活动，底部模型与目录
+    def compose(self) -> ComposeResult:
+        with Vertical(id="welcome-frame"):
+            yield Static(_pixel_title(), id="pixel-title")
+            with Horizontal(id="welcome-body"):
+                with Vertical(id="intro"):
+                    yield Label("Welcome back!", id="welcome-heading")
+                    yield Static(_pixel_mascot(), id="pet")
+                with Vertical(id="details"):
+                    yield Static("›  Type a goal and press Enter", classes="tip")
+                    yield Static("›  Type / for skills and commands", classes="tip")
+                    yield Static("›  Press Ctrl+Q to exit", classes="tip")
+                    yield Static("──────  Recent activity", classes="activity-rule")
+                    yield Static("No recent activity", classes="activity-empty")
+            with Vertical(id="welcome-meta"):
+                yield Static("MAI-CODE · local agent runtime", classes="meta")
+                yield Static(_display_cwd(), classes="meta")
+
+
+# 当前工作目录缩略显示：home 内用 ~ 前缀，过长时只保留末两级目录
+def _display_cwd() -> str:
+    home = str(Path.home())
+    cwd = str(Path.cwd())
+    text = f"~{cwd[len(home):]}" if cwd.startswith(home) else cwd
+    if len(text) <= 48:
+        return text
+    parts = [p for p in text.split("/") if p]
+    return "…/" + "/".join(parts[-2:])
 
 
 def _preview(s: str, n: int) -> str:
@@ -80,9 +269,18 @@ class ToolCallBlock(Widget):
     """可折叠的工具调用块：折叠时显示摘要，点击后展开完整 params 和 output。"""
 
     DEFAULT_CSS = """
-    ToolCallBlock { height: auto; padding: 0 2; color: $text-muted; }
-    ToolCallBlock > .summary { color: $text-muted; }
-    ToolCallBlock > .detail { display: none; padding: 0 2 0 4; color: $text-muted; }
+    ToolCallBlock {
+        height: auto;
+        padding: 0 2;
+        color: #94a3b8;
+    }
+    ToolCallBlock:hover > .summary { color: #dbeafe; }
+    ToolCallBlock > .summary { color: #94a3b8; }
+    ToolCallBlock > .detail {
+        display: none;
+        padding: 0 2 0 4;
+        color: #94a3b8;
+    }
     ToolCallBlock.expanded > .detail { display: block; }
     """
 
@@ -150,8 +348,14 @@ class PermissionSelect(Static):
     DEFAULT_CSS = """
     PermissionSelect {
         height: auto;
-        padding: 0 2;
-        margin-bottom: 1;
+        padding: 1 2;
+        margin: 0 2 1 2;
+        border: round #2563eb;
+        background: #0b1930;
+        color: #dbeafe;
+    }
+    PermissionSelect:focus {
+        border: round #60a5fa;
     }
     """
 
@@ -204,7 +408,11 @@ class PermissionSelect(Static):
 
     # 焦点到达时记录，用于确认 focus() 是否真正生效
     def on_focus(self, event: events.Focus) -> None:
-        log.debug("PermissionSelect.on_focus  has_focus=%s  app.focused=%r", self.has_focus, self.app.focused)
+        log.debug(
+            "PermissionSelect.on_focus  has_focus=%s  app.focused=%r",
+            self.has_focus,
+            self.app.focused,
+        )
 
     # 焦点离开时记录，用于追踪是否被其他控件抢走焦点
     def on_blur(self, event: events.Blur) -> None:
@@ -260,6 +468,16 @@ class PermissionBlock(Static):
     }
     LABEL_MAP = _LABEL_MAP
 
+    DEFAULT_CSS = """
+    PermissionBlock {
+        height: auto;
+        padding: 1 2;
+        margin: 1 2 0 2;
+        border: round #7f1d1d;
+        background: #21121c;
+    }
+    """
+
     # 子类提交消息：用户作出权限决策时发布
     class Resolved(Message):
         def __init__(self, block: PermissionBlock, decision: str) -> None:
@@ -302,10 +520,13 @@ class SlashCompleteWidget(Static):
     DEFAULT_CSS = """
     SlashCompleteWidget {
         height: auto;
+        max-height: 10;
         padding: 0 1;
         margin: 0 2;
-        background: $surface;
-        border: round $surface-lighten-2;
+        background: #0b1930;
+        border: round #2563eb;
+        color: #dbeafe;
+        overflow-y: auto;
     }
     """
 
@@ -462,40 +683,72 @@ class ChatTextArea(TextArea):
 
 
 class MaiTuiApp(App[None]):
-    """MaiCode TUI：终端滚屏风格，实时展示 agent 执行过程。"""
+    """MaiCode TUI：蓝色像素风终端界面，实时展示 agent 执行过程。"""
 
     TITLE = "MaiCode"
     BINDINGS = [
         Binding("ctrl+q", "quit", "quit"),
     ]
     CSS = """
-    Screen { background: $background; }
+    Screen { background: #07090e; }
     #header {
-        height: 1;
-        background: $surface;
-        color: $text;
-        padding: 0 1;
+        height: 3;
+        background: #07090e;
+        color: #e6ebf3;
+        padding: 1 2 0 2;
+        border-bottom: solid #315da9;
     }
     #log-view {
         height: 1fr;
         scrollbar-size-vertical: 1;
         scrollbar-size-horizontal: 1;
+        background: #07090e;
     }
-    #banner { padding: 1 2 0 2; }
-    Static.user-turn { color: $text; padding: 1 2 0 2; }
-    Static.run-header { color: $text-muted; padding: 1 2 0 2; }
-    Static.step-divider { color: $text-muted; padding: 0 2; }
-    Static.run-ok { color: green; padding: 0 2 1 2; }
-    Static.run-err { color: red; padding: 0 2 1 2; }
-    Static.usage { padding: 0 2; }
+    Static.user-turn {
+        color: #e6ebf3;
+        padding: 1 2 0 2;
+        border-left: solid #2563eb;
+        margin: 1 2 0 2;
+    }
+    Static.run-header { color: #b2bfd2; padding: 1 2 0 2; }
+    Static.step-divider { color: #64748b; padding: 0 2; }
+    Static.run-ok { color: #4ade80; padding: 0 2 1 2; }
+    Static.run-err { color: #f87171; padding: 0 2 1 2; }
+    Static.usage { padding: 0 2; color: #8fa7c7; }
     Static.log-line { padding: 0 2; }
+    #prompt {
+        height: auto;
+        min-height: 3;
+        max-height: 12;
+        margin: 0 2;
+        border: round #4d83e8;
+        background: #070b14;
+        color: #e6ebf3;
+        padding: 0 1;
+    }
+    #prompt:focus {
+        border: round #77a8ff;
+        background: #070b14;
+    }
+    #prompt:disabled {
+        border: round #315da9;
+        color: #8993a7;
+    }
+    #footer {
+        height: 2;
+        margin: 0 2;
+        color: #566074;
+        layout: horizontal;
+        align-vertical: middle;
+    }
+    #footer-left, #footer-right {
+        width: 1fr;
+        color: #566074;
+    }
+    #footer-right {
+        text-align: right;
+    }
     """
-
-    _BANNER = (
-        "[bold cyan]  MaiCode — Local Agent Runtime[/bold cyan]\n"
-        "[bold cyan]  从零实现的本地 Claude Code Agent 运行时[/bold cyan]\n"
-        "[dim]  输入消息开始对话  ·  键入 / 触发 skill  ·  Ctrl+C 退出[/dim]"
-    )
 
     # 初始化连接参数和 TUI 内部状态
     def __init__(self, host: str, port: int, replay_run_id: str | None = None) -> None:
@@ -515,17 +768,30 @@ class MaiTuiApp(App[None]):
         self._subagent_start_times: dict[str, float] = {}  # child run_id -> start time
 
     def compose(self) -> ComposeResult:
-        yield Label("[bold]MaiCode[/bold]  [dim]connecting...[/dim]", id="header")
+        yield Label(
+            "[bold #eef3fb]MAI-CODE[/bold #eef3fb]  "
+            "[#8fb7e8]◆[/#8fb7e8] [dim]connecting...[/dim]",
+            id="header",
+        )
         yield VerticalScroll(id="log-view")
-        yield ChatTextArea(id="prompt", show_line_numbers=False)
+        yield ChatTextArea(
+            id="prompt",
+            show_line_numbers=False,
+            placeholder="Ask MAI-CODE anything…",
+        )
+        yield Horizontal(
+            Label("local agent runtime", id="footer-left"),
+            Label("Ctrl+Q  quit", id="footer-right"),
+            id="footer",
+        )
 
     def on_mount(self) -> None:
         self._slash_items = self._build_slash_items()
-        self._append(Static(self._BANNER, id="banner"))
+        self._append(WelcomePanel())
         self.run_worker(self._socket_loop(), exclusive=True, name="socket")
         prompt = self.query_one("#prompt", ChatTextArea)
         prompt.disabled = True
-        prompt.border_title = "connecting..."
+        prompt.border_title = "type a message · enter to send · ⌘/⇧/⌥ + enter for newline"
 
     # 构建斜杠命令候选列表：内建命令 + 所有已注册 skill
     def _build_slash_items(self) -> list[tuple[str, str]]:
@@ -742,13 +1008,14 @@ class MaiTuiApp(App[None]):
             return
         session = f"  [dim]{self._session_id}[/dim]" if self._session_id else ""
         color = {
-            "ready": "green",
-            "running": "yellow",
-            "disconnected": "red",
-            "connecting": "dim",
+            "ready": "#79d6a5",
+            "running": "#f2c36b",
+            "disconnected": "#e57f8a",
+            "connecting": "#94a3b8",
         }.get(state, "dim")
         header.update(
-            f"[bold]MaiCode[/bold]  [dim]{self._host}:{self._port}[/dim]"
+            f"[bold #eef3fb]MAI-CODE[/bold #eef3fb]  "
+            f"[#8fb7e8]◆[/#8fb7e8] [dim]{self._host}:{self._port}[/dim]"
             f"{session}  [{color}]{state}[/{color}]"
         )
 
@@ -814,7 +1081,7 @@ class MaiTuiApp(App[None]):
                 self._update_header("ready")
                 await loop_task
             except IpcError as e:
-                header.update(f"[bold]MaiCode[/bold]  [red]subscribe error: {e}[/red]")
+                header.update(f"[bold]MAI-CODE[/bold]  [red]subscribe error: {e}[/red]")
             finally:
                 if not loop_task.done():
                     loop_task.cancel()
@@ -1019,10 +1286,13 @@ class MaiTuiApp(App[None]):
             self._append(perm_block)
             select = PermissionSelect(tool_use_id)
             self._mount_permission_select(select)
-            log.debug("PermissionSelect mounted before #prompt  pending=%d", len(self._pending_permission_blocks))
+            log.debug(
+                "PermissionSelect mounted before #prompt  pending=%d",
+                len(self._pending_permission_blocks),
+            )
 
         elif t == "permission.denied":
-            # 处理超时或断连等非用户交互触发的 deny（用户主动 deny 已由 on_permission_select_decided 处理）
+            # 处理超时或断连触发的 deny，用户主动 deny 已在决策处理器中完成
             tool_use_id = str(event.get("tool_use_id", ""))
             decision = str(event.get("decision", "denied"))
             if tool_use_id in self._pending_permission_blocks:

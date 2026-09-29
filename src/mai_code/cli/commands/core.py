@@ -52,7 +52,7 @@ def cmd_core_start(config: MaiConfig) -> None:
 
     proc = subprocess.Popen(
         [sys.executable, "-m", "mai_code.core"],
-        start_new_session=True,
+        start_new_session=sys.platform != "win32",  # Windows 无 setsid
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )

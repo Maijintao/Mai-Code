@@ -13,6 +13,64 @@
 - 上下文快爆了，不是粗暴截断，而是有水位检测和 compact 压缩
 - 复杂任务可以交给子 Agent（Subagents），外部工具通过 MCP 接入
 
+## 安装与快速开始
+
+### macOS / Linux（一条命令）
+
+```bash
+bash bootstrap.sh
+```
+
+脚本会自动完成：找 Python ≥ 3.12 → 创建虚拟环境 → 安装依赖 → 首次运行弹出配置向导（填 base_url、api_key，自动探测端点可用模型）→ 直接进入 TUI。
+
+之后日常使用仓库根目录的两个包装命令：
+
+```bash
+./mai-tui                # TUI（推荐，后端 mai-core 会自动拉起）
+./mai chat               # CLI 多轮对话
+./mai run --goal "目标"   # CLI 单次任务
+./mai init               # 重新配置端点 / 模型
+```
+
+> `mai-tui` 启动时会自动检测并拉起 `mai-core` 后端，不需要手动管理守护进程。
+
+### Windows
+
+暂无 `bootstrap.bat`，手动执行等价步骤（PowerShell）：
+
+```powershell
+# 1. 确认 Python ≥ 3.12（没有就去 python.org 装）
+py -3.12 --version
+
+# 2. 在仓库根目录创建虚拟环境并安装
+py -3.12 -m venv .venv
+.venv\Scripts\pip install .
+
+# 3. 配置 + 启动（首次运行会自动弹出配置向导）
+.venv\Scripts\mai-tui
+```
+
+之后日常使用：
+
+```powershell
+.venv\Scripts\mai-tui     # TUI
+.venv\Scripts\Mai chat    # CLI
+.venv\Scripts\Mai init    # 重新配置
+```
+
+### 配置说明
+
+向导会把配置写入 `~/.mai/config.toml`，也可以手动编辑：
+
+```toml
+[llm]
+base_url = "https://api.deepseek.com/anthropic"   # 任意 Anthropic 兼容端点
+api_key = "sk-..."
+default_model = "deepseek-chat"
+```
+
+也支持环境变量：`ANTHROPIC_BASE_URL` / `ANTHROPIC_API_KEY` / `MAI_LLM_DEFAULT_MODEL` 等（优先级高于 toml）。
+
 ## 架构
 
 **双进程架构**：常驻守护进程 `mai-core` 真正执行任务，`Mai`（CLI）和 `mai-tui`（TUI）作为客户端通过类型化 IPC 协议接入。

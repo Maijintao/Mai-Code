@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import logging.handlers
 import os
 from pathlib import Path
 
-from mai_code.core.config import get_config
+from mai_code.cli.commands.core import _ping_check, cmd_core_start
+from mai_code.cli.commands.init import ensure_configured
+from mai_code.core.config import MaiConfig, get_config
 from mai_code.tui.app import MaiTuiApp
 
 _DEFAULT_TUI_LOG = "~/.mai/logs/tui.log"
@@ -31,6 +34,16 @@ def _setup_logging(level: str) -> None:
     root.addHandler(handler)
 
 
+# 后端未运行时自动拉起 mai-core（复用 core start 的子进程逻辑）
+def _ensure_core_running(config: MaiConfig) -> None:
+    try:
+        asyncio.run(_ping_check(config))
+        return  # 已在运行
+    except (ConnectionRefusedError, OSError):
+        pass
+    cmd_core_start(config)
+
+
 # mai-tui 入口：解析 --replay 参数后启动 TUI 应用
 def main() -> None:
     parser = argparse.ArgumentParser(prog="mai-tui", description="MaiCode TUI")
@@ -41,7 +54,8 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    config = get_config()
+    config = ensure_configured()
+    _ensure_core_running(config)
     _setup_logging(config.logging.level)
     app = MaiTuiApp(config.host, config.port, replay_run_id=args.replay)
     app.run()

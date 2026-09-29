@@ -5,6 +5,7 @@ import sys
 
 from mai_code.cli.commands.chat import cmd_chat
 from mai_code.cli.commands.core import cmd_core_start, cmd_core_status, cmd_core_stop
+from mai_code.cli.commands.init import cmd_init, ensure_configured
 from mai_code.cli.commands.ping import cmd_ping
 from mai_code.cli.commands.run import cmd_run
 from mai_code.cli.commands.trace import cmd_trace
@@ -19,6 +20,7 @@ def main() -> None:
     parser.add_argument("--version", action="store_true", help="Print version and exit")
     subparsers = parser.add_subparsers(dest="command")
 
+    subparsers.add_parser("init", help="Configure LLM endpoint, key and model")
     subparsers.add_parser("ping", help="Ping the core daemon")
     subparsers.add_parser("chat", help="Start a multi-turn chat session")
 
@@ -47,12 +49,14 @@ def main() -> None:
     config = get_config()
     setup_logging(config)
 
-    if args.command == "ping":
+    if args.command == "init":
+        cmd_init(config)
+    elif args.command == "ping":
         cmd_ping(config)
     elif args.command == "chat":
-        cmd_chat(config)
+        cmd_chat(ensure_configured())
     elif args.command == "run":
-        cmd_run(args.goal, config)
+        cmd_run(args.goal, ensure_configured())
     elif args.command == "core":
         if args.core_command == "start":
             cmd_core_start(config)

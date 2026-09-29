@@ -6,7 +6,6 @@ import fnmatch
 import json
 import logging
 import os
-import re
 import signal
 import sys
 import time
@@ -17,7 +16,6 @@ from typing import Any
 from pydantic import BaseModel
 
 import anthropic
-import httpx
 import mai_code
 from mai_code.core.bus.commands import (
     AgentRunCommand,
@@ -43,6 +41,7 @@ from mai_code.core.bus.commands import (
 from mai_code.core.bus.envelope import EventPushEnvelope
 from mai_code.core.config import MaiConfig, get_config
 from mai_code.core.events.bus import EventBus
+from mai_code.core.llm.probe import detect_endpoint_models
 from mai_code.core.llm.provider import AnthropicProvider
 from mai_code.core.logging_setup import setup_logging
 from mai_code.core.mcp.server import McpServerManager
@@ -173,52 +172,13 @@ class CoreApp:
             available_models=available,
         )
 
-    # 探测端点支持的模型列表，结果缓存。两种策略：
-    # 1) Anthropic SDK 的 /v1/models（官方端点与部分网关）
-    # 2) OpenAI 风格 GET {origin}/models、{origin}/v1/models（DeepSeek 等兼容网关）
-    # 全部失败返回空列表，调用方回退默认模型
+    # 探测端点支持的模型列表（委托给 probe 模块，结果缓存）
     async def _detect_endpoint_models(self) -> list[str]:
         if self._detected_models is not None:
             return self._detected_models
         assert self._config is not None
         llm = self._config.llm
-        base = (llm.base_url or os.environ.get("ANTHROPIC_BASE_URL") or "").rstrip("/")
-        key = (
-            llm.api_key
-            or os.environ.get("ANTHROPIC_API_KEY")
-            or os.environ.get("ANTHROPIC_AUTH_TOKEN")
-            or ""
-        )
-        models: list[str] = []
-        # 策略 1：Anthropic 风格
-        try:
-            kwargs: dict[str, Any] = {"api_key": key or "empty"}
-            if base:
-                kwargs["base_url"] = base
-            client = anthropic.AsyncAnthropic(**kwargs)
-            page = await asyncio.wait_for(client.models.list(), timeout=5.0)
-            models = sorted({m.id for m in page.data})
-        except Exception as e:
-            logger.info("anthropic /v1/models probe failed: %s", e)
-        # 策略 2：OpenAI 风格（两种响应都是 data[].id，解析一致）
-        if not models and base:
-            origin = re.sub(r"/anthropic$", "", base)
-            for url in (f"{origin}/models", f"{origin}/v1/models", f"{base}/v1/models"):
-                try:
-                    async with httpx.AsyncClient(timeout=5.0) as hc:
-                        resp = await hc.get(
-                            url,
-                            headers={"Authorization": f"Bearer {key}", "x-api-key": key},
-                        )
-                        resp.raise_for_status()
-                        ids = [str(m["id"]) for m in resp.json().get("data", []) if m.get("id")]
-                    if ids:
-                        models = sorted(set(ids))
-                        break
-                except Exception as e:
-                    logger.info("model probe %s failed: %s", url, e)
-        self._detected_models = models
-        logger.info("detected %d models from endpoint", len(models))
+        self._detected_models = await detect_endpoint_models(llm.base_url, llm.api_key)
         return self._detected_models
 
     # 关闭 session 并返回 closed 状态

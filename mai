@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Mai-Code CLI 包装：转发所有参数给虚拟环境里的 Mai 命令
+exec "$(dirname "$0")/.venv/bin/Mai" "$@"

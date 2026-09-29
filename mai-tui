@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Mai-Code TUI 包装：转发所有参数给虚拟环境里的 mai-tui 命令
+exec "$(dirname "$0")/.venv/bin/mai-tui" "$@"

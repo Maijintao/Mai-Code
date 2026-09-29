@@ -88,6 +88,9 @@ class LlmUsageEvent(BaseModel):
     cache_read_input_tokens: int
     cache_creation_input_tokens: int
     context_pct: float = 0.0
+    context_tokens: int = 0  # input + cache_read + cache_creation
+    context_window: int = 0  # 模型上下文窗口上限
+    model: str = ""
     ts: str
 
 

@@ -100,6 +100,16 @@ class SessionCompactResult(BaseModel):
     saved_tokens: int
 
 
+class SessionSetModelCommand(BaseModel):
+    type: Literal["session.set_model"] = "session.set_model"
+    model: str = ""  # 空串表示仅查询当前模型
+
+
+class SessionSetModelResult(BaseModel):
+    current_model: str
+    available_models: list[str] = []
+
+
 # 根据 type 字段决定命令类型的判别联合
 Command = Annotated[
     PingCommand
@@ -110,6 +120,7 @@ Command = Annotated[
     | SessionGetHistoryCommand
     | SessionCloseCommand
     | PermissionRespondCommand
-    | SessionCompactCommand,
+    | SessionCompactCommand
+    | SessionSetModelCommand,
     Discriminator("type"),
 ]

@@ -34,6 +34,9 @@ class AgentConfig:
 @dataclass
 class LlmConfig:
     default_model: str = _DEFAULT_MODEL
+    models: list[str] = field(default_factory=list)  # 可切换的模型白名单；空 = 自动探测
+    base_url: str = ""  # Anthropic 兼容端点；空 = 官方默认
+    api_key: str = ""  # 空 = 用 ANTHROPIC_API_KEY 环境变量
     router: str = "static"  # "static" | "rule_based" (S4) | "cost_budget" (S6)
 
 
@@ -170,7 +173,9 @@ def _apply_toml(config: MaiConfig, data: dict[str, Any]) -> None:
         llm = data["llm"]
         if not isinstance(llm, dict):
             raise SystemExit("Config error: [llm] must be a table")
-        unknown_llm: set[str] = set(llm.keys()) - {"default_model", "router"}
+        unknown_llm: set[str] = set(llm.keys()) - {
+            "default_model", "models", "router", "base_url", "api_key",
+        }
         if unknown_llm:
             raise SystemExit(f"Unknown [llm] keys: {', '.join(sorted(unknown_llm))}")
         if "default_model" in llm:
@@ -183,6 +188,21 @@ def _apply_toml(config: MaiConfig, data: dict[str, Any]) -> None:
             if not isinstance(val, str):
                 raise SystemExit("Config error: llm.router must be a string")
             config.llm.router = val
+        if "models" in llm:
+            val = llm["models"]
+            if not isinstance(val, list) or not all(
+                isinstance(m, str) and m for m in val
+            ):
+                raise SystemExit(
+                    "Config error: llm.models must be a list of non-empty strings"
+                )
+            config.llm.models = val
+        for key_name in ("base_url", "api_key"):
+            if key_name in llm:
+                val = llm[key_name]
+                if not isinstance(val, str):
+                    raise SystemExit(f"Config error: llm.{key_name} must be a string")
+                setattr(config.llm, key_name, val)
 
     if "trace" in data:
         trace = data["trace"]
@@ -334,6 +354,18 @@ def _apply_env(config: MaiConfig) -> None:
     default_model = os.environ.get("MAI_LLM_DEFAULT_MODEL")
     if default_model is not None:
         config.llm.default_model = default_model
+
+    models_env = os.environ.get("MAI_LLM_MODELS")
+    if models_env is not None:
+        config.llm.models = [m.strip() for m in models_env.split(",") if m.strip()]
+
+    base_url_env = os.environ.get("MAI_LLM_BASE_URL")
+    if base_url_env is not None:
+        config.llm.base_url = base_url_env.strip()
+
+    api_key_env = os.environ.get("MAI_LLM_API_KEY")
+    if api_key_env is not None:
+        config.llm.api_key = api_key_env.strip()
 
     trace_enabled = os.environ.get("MAI_TRACE_ENABLED")
     if trace_enabled is not None:

@@ -17,6 +17,8 @@ _MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     "claude-sonnet-4-6": 200_000,
     "claude-haiku-4-5-20251001": 200_000,
     "claude-opus-4-7": 200_000,
+    "deepseek-chat": 131_072,
+    "deepseek-reasoner": 131_072,
 }
 
 _MAX_STREAM_RETRIES = 3
@@ -28,6 +30,11 @@ log = logging.getLogger(__name__)
 # 返回指定模型的最大 context window token 数
 def _context_window(model: str) -> int:
     return _MODEL_CONTEXT_WINDOWS.get(model, 200_000)
+
+
+# 返回已知可用模型列表（配置了 context window 的模型）
+def available_models() -> list[str]:
+    return sorted(_MODEL_CONTEXT_WINDOWS)
 
 
 _SYSTEM_PROMPT = (
@@ -44,12 +51,22 @@ def _now() -> str:
 
 class AnthropicProvider:
     # 初始化 Anthropic 客户端；client 可在测试时注入以跳过 API key 检查
-    def __init__(self, model: str, client: Any = None) -> None:
+    def __init__(
+        self,
+        model: str,
+        client: Any = None,
+        *,
+        base_url: str | None = None,
+        api_key: str | None = None,
+    ) -> None:
         if client is None:
-            api_key = os.environ.get("ANTHROPIC_API_KEY")
-            if not api_key:
+            key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+            if not key:
                 raise SystemExit("ANTHROPIC_API_KEY not set")
-            self._client: Any = anthropic.AsyncAnthropic(api_key=api_key)
+            kwargs: dict[str, Any] = {"api_key": key}
+            if base_url:
+                kwargs["base_url"] = base_url
+            self._client: Any = anthropic.AsyncAnthropic(**kwargs)
         else:
             self._client = client
         self._model = model
@@ -135,6 +152,9 @@ class AnthropicProvider:
                 cache_read_input_tokens=cache_read,
                 cache_creation_input_tokens=cache_create,
                 context_pct=context_pct,
+                context_tokens=usage.input_tokens + cache_read + cache_create,
+                context_window=_context_window(self._model),
+                model=self._model,
                 ts=_now(),
             )
         )

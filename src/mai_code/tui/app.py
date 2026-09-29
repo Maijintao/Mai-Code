@@ -114,7 +114,7 @@ class WelcomePanel(Static):
     DEFAULT_CSS = """
     WelcomePanel {
         width: 1fr;
-        height: 1fr;
+        height: auto;
         padding: 0;
         align: center middle;
         color: #e6ebf3;
@@ -216,6 +216,25 @@ def _preview(s: str, n: int) -> str:
     return s[:n] + "…" if len(s) > n else s
 
 
+# 按终端显示宽度截断字符串（CJK 字符按双宽计）
+def _display_truncate(s: str, limit: int) -> str:
+    width = 0
+    for i, ch in enumerate(s):
+        width += 2 if ord(ch) > 0x2E80 else 1
+        if width > limit:
+            return s[:i] + "…"
+    return s
+
+
+# token 数简写：1234 -> 1.2k，1000000 -> 1M
+def _fmt_tokens(n: int) -> str:
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}".rstrip("0").rstrip(".") + "M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}".rstrip("0").rstrip(".") + "k"
+    return str(n)
+
+
 
 
 def _params_str(params: dict[str, Any]) -> str:
@@ -241,7 +260,7 @@ def _param_summary(tool_name: str, params: dict[str, Any], max_len: int = 72) ->
 class LLMStreamBlock(Static):
     """在同一个 Static widget 中累积 LLM 流式 token。"""
 
-    DEFAULT_CSS = "LLMStreamBlock { padding: 0 2; color: $text; }"
+    DEFAULT_CSS = "LLMStreamBlock { padding: 0 2; margin-bottom: 1; color: $text; }"
 
     # 初始化为空文本块
     def __init__(self) -> None:
@@ -272,14 +291,14 @@ class ToolCallBlock(Widget):
     ToolCallBlock {
         height: auto;
         padding: 0 2;
-        color: #94a3b8;
+        color: #6b7a92;
     }
     ToolCallBlock:hover > .summary { color: #dbeafe; }
-    ToolCallBlock > .summary { color: #94a3b8; }
+    ToolCallBlock > .summary { color: #6b7a92; }
     ToolCallBlock > .detail {
         display: none;
         padding: 0 2 0 4;
-        color: #94a3b8;
+        color: #8b99ad;
     }
     ToolCallBlock.expanded > .detail { display: block; }
     """
@@ -523,9 +542,8 @@ class SlashCompleteWidget(Static):
         max-height: 10;
         padding: 0 1;
         margin: 0 2;
-        background: #0b1930;
-        border: round #2563eb;
-        color: #dbeafe;
+        background: transparent;
+        color: #e6ebf3;
         overflow-y: auto;
     }
     """
@@ -573,23 +591,99 @@ class SlashCompleteWidget(Static):
     def has_selection(self) -> bool:
         return len(self._filtered) > 0
 
+    # 返回当前高亮的命令名（无可选项时为空串）
+    def selected_name(self) -> str:
+        if not self._filtered:
+            return ""
+        return self._filtered[self._cursor][0]
+
     def on_mount(self) -> None:
         self._redraw()
 
-    # 渲染筛选后的命令列表，高亮当前光标项
+    # 渲染筛选后的命令列表：Codex 风格——无框深底、白字、灰描述列对齐，选中行蓝底
     def _redraw(self) -> None:
         if not self._filtered:
             self.update("[dim]  no matching commands[/dim]")
             return
+        width = max(len(name) for name, _ in self._filtered)
         lines: list[str] = []
         for i, (name, desc) in enumerate(self._filtered):
-            desc_part = f"  [dim]{desc}[/dim]" if desc else ""
+            label = f"/{name}".ljust(width + 1)
+            desc = _display_truncate(desc, 60)
             if i == self._cursor:
-                lines.append(f"  [bold cyan]❯ /{name}[/bold cyan]{desc_part}")
+                lines.append(f"[on #2563eb] ❯ [bold]{label}[/bold]{desc} [/on #2563eb]")
             else:
-                lines.append(f"    [cyan]/{name}[/cyan]{desc_part}")
+                lines.append(f"   {label} [dim]{desc}[/dim]")
         lines.append("[dim]  ↑↓ navigate   tab/enter select   esc dismiss[/dim]")
         self.update("\n".join(lines))
+
+
+class ModelSelectWidget(Static):
+    """模型选择弹窗：↑/↓ 移动光标、enter 确认切换、esc 取消。"""
+
+    can_focus = True
+
+    DEFAULT_CSS = """
+    ModelSelectWidget {
+        height: auto;
+        max-height: 10;
+        padding: 0 1;
+        margin: 0 2;
+        background: transparent;
+        color: #e6ebf3;
+    }
+    """
+
+    class Selected(Message):
+        def __init__(self, model: str) -> None:
+            self.model = model
+            super().__init__()
+
+    class Cancelled(Message):
+        pass
+
+    def __init__(self, models: list[str], current: str) -> None:
+        super().__init__("")
+        self._models = models
+        self._current = current
+        self._cursor = models.index(current) if current in models else 0
+
+    def on_mount(self) -> None:
+        self._redraw()
+
+    def _redraw(self) -> None:
+        width = max(len(m) for m in self._models)
+        lines = []
+        for i, m in enumerate(self._models):
+            mark = "✓" if m == self._current else " "
+            label = f"{mark} {m}".ljust(width + 3)
+            if i == self._cursor:
+                lines.append(f"[on #2563eb] ❯ [bold]{label}[/bold] [/on #2563eb]")
+            else:
+                lines.append(f"   {label}")
+        lines.append("[dim]  ↑/↓ select · enter confirm · esc cancel[/dim]")
+        self.update("\n".join(lines))
+
+    def _on_key(self, event: events.Key) -> None:
+        key = event.key
+        if key in ("up", "k"):
+            event.stop()
+            event.prevent_default()
+            self._cursor = (self._cursor - 1) % len(self._models)
+            self._redraw()
+        elif key in ("down", "j"):
+            event.stop()
+            event.prevent_default()
+            self._cursor = (self._cursor + 1) % len(self._models)
+            self._redraw()
+        elif key == "enter":
+            event.stop()
+            event.prevent_default()
+            self.post_message(self.Selected(self._models[self._cursor]))
+        elif key == "escape":
+            event.stop()
+            event.prevent_default()
+            self.post_message(self.Cancelled())
 
 
 class ChatTextArea(TextArea):
@@ -647,8 +741,10 @@ class ChatTextArea(TextArea):
             event.stop()
             event.prevent_default()
             if popup is not None and popup.has_selection():
-                popup.select_current()
-                return
+                # 已输入完整命令时直接提交，否则先补全
+                if self.text.strip() != f"/{popup.selected_name()}":
+                    popup.select_current()
+                    return
             if self.text.strip():
                 self.post_message(self.Submitted(self))
             return
@@ -682,6 +778,24 @@ class ChatTextArea(TextArea):
         await super()._on_key(event)
 
 
+class SmoothLogView(VerticalScroll):
+    """日志滚动容器：滚轮滚动带缓动动画，减少生硬跳行感。"""
+
+    def _on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        if event.ctrl or event.shift:
+            super()._on_mouse_scroll_down(event)  # 横向滚动保持原行为
+            return
+        event.stop()
+        self.scroll_relative(y=self.app.scroll_sensitivity_y, animate=True, duration=0.3)
+
+    def _on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        if event.ctrl or event.shift:
+            super()._on_mouse_scroll_up(event)
+            return
+        event.stop()
+        self.scroll_relative(y=-self.app.scroll_sensitivity_y, animate=True, duration=0.3)
+
+
 class MaiTuiApp(App[None]):
     """MaiCode TUI：蓝色像素风终端界面，实时展示 agent 执行过程。"""
 
@@ -700,9 +814,12 @@ class MaiTuiApp(App[None]):
     }
     #log-view {
         height: 1fr;
-        scrollbar-size-vertical: 1;
+        scrollbar-size-vertical: 0;
         scrollbar-size-horizontal: 1;
         background: #07090e;
+    }
+    #log-view > * {
+        max-width: 96;
     }
     Static.user-turn {
         color: #e6ebf3;
@@ -710,11 +827,11 @@ class MaiTuiApp(App[None]):
         border-left: solid #2563eb;
         margin: 1 2 0 2;
     }
-    Static.run-header { color: #b2bfd2; padding: 1 2 0 2; }
-    Static.step-divider { color: #64748b; padding: 0 2; }
+    Static.run-header { color: #6b7a92; padding: 1 2 0 2; margin-top: 1; }
+    Static.step-divider { color: #566074; padding: 0 2; }
     Static.run-ok { color: #4ade80; padding: 0 2 1 2; }
     Static.run-err { color: #f87171; padding: 0 2 1 2; }
-    Static.usage { padding: 0 2; color: #8fa7c7; }
+    Static.usage { padding: 0 2; color: #566074; }
     Static.log-line { padding: 0 2; }
     #prompt {
         height: auto;
@@ -741,8 +858,12 @@ class MaiTuiApp(App[None]):
         layout: horizontal;
         align-vertical: middle;
     }
-    #footer-left, #footer-right {
+    #footer-left {
         width: 1fr;
+        color: #566074;
+    }
+    #footer-right {
+        width: auto;
         color: #566074;
     }
     #footer-right {
@@ -753,6 +874,7 @@ class MaiTuiApp(App[None]):
     # 初始化连接参数和 TUI 内部状态
     def __init__(self, host: str, port: int, replay_run_id: str | None = None) -> None:
         super().__init__()
+        self.scroll_sensitivity_y = 1.0  # 滚轮每 tick 1 行（默认 2 行，太灵敏）
         self._host = host
         self._port = port
         self._replay_run_id = replay_run_id
@@ -763,6 +885,11 @@ class MaiTuiApp(App[None]):
         self._session_id: str | None = None
         self._busy = False
         self._last_context_pct: float = 0.0
+        self._model: str | None = None
+        self._ctx_tokens: int = 0
+        self._ctx_window: int = 0
+        self._run_started_at: float | None = None
+        self._last_run_elapsed: float | None = None
         self._slash_items: list[tuple[str, str]] = []
         self._subagent_run_ids: dict[str, str] = {}  # child run_id -> description
         self._subagent_start_times: dict[str, float] = {}  # child run_id -> start time
@@ -773,14 +900,14 @@ class MaiTuiApp(App[None]):
             "[#8fb7e8]◆[/#8fb7e8] [dim]connecting...[/dim]",
             id="header",
         )
-        yield VerticalScroll(id="log-view")
+        yield SmoothLogView(id="log-view")
         yield ChatTextArea(
             id="prompt",
             show_line_numbers=False,
             placeholder="Ask MAI-CODE anything…",
         )
         yield Horizontal(
-            Label("local agent runtime", id="footer-left"),
+            Label("", id="footer-left"),
             Label("Ctrl+Q  quit", id="footer-right"),
             id="footer",
         )
@@ -788,6 +915,7 @@ class MaiTuiApp(App[None]):
     def on_mount(self) -> None:
         self._slash_items = self._build_slash_items()
         self._append(WelcomePanel())
+        self.set_interval(1.0, self._update_footer)
         self.run_worker(self._socket_loop(), exclusive=True, name="socket")
         prompt = self.query_one("#prompt", ChatTextArea)
         prompt.disabled = True
@@ -795,7 +923,10 @@ class MaiTuiApp(App[None]):
 
     # 构建斜杠命令候选列表：内建命令 + 所有已注册 skill
     def _build_slash_items(self) -> list[tuple[str, str]]:
-        items: list[tuple[str, str]] = [("compact", "compress context window")]
+        items: list[tuple[str, str]] = [
+            ("compact", "compress context window"),
+            ("model", "show or switch LLM model"),
+        ]
         try:
             loader = SkillLoader()
             for skill in loader.list_all_skills():
@@ -883,6 +1014,16 @@ class MaiTuiApp(App[None]):
             if self._client is not None and self._session_id is not None and not self._busy:
                 self.run_worker(self._do_compact(), name="compact", exclusive=False)
             return
+        # 检测 /model 指令：无参数弹选择器，带参数直接切换
+        parts = content.split(None, 1)
+        if parts[0] == "/model":
+            event.text_area.text = ""
+            arg = parts[1].strip() if len(parts) > 1 else ""
+            if arg:
+                self.run_worker(self._do_set_model(arg), name="set_model", exclusive=False)
+            else:
+                self.run_worker(self._do_open_model_picker(), name="model_picker", exclusive=False)
+            return
         if self._client is None or self._session_id is None or self._busy:
             self._append(Static("[yellow]agent busy or disconnected[/yellow]", classes="log-line"))
             return
@@ -909,6 +1050,7 @@ class MaiTuiApp(App[None]):
             summary_tokens = result.get("summary_tokens", 0)
             saved_tokens = result.get("saved_tokens", 0)
             self._last_context_pct = 0.0
+            self._ctx_tokens = 0
             self._append(Static(
                 f"[bold cyan]⚡ Context compacted[/bold cyan]"
                 f"  [dim]summary={summary_tokens} tokens  saved≈{saved_tokens} tokens[/dim]",
@@ -916,6 +1058,80 @@ class MaiTuiApp(App[None]):
             ))
         except (IpcError, RuntimeError, OSError) as e:
             self._append(Static(f"[red]compact error: {e}[/red]", classes="log-line"))
+
+    # 拉取模型列表并弹出选择器（/model 无参数时）
+    async def _do_open_model_picker(self) -> None:
+        if self._client is None:
+            self._append(Static("[yellow]disconnected[/yellow]", classes="log-line"))
+            return
+        try:
+            result = await self._client.send_command("session.set_model", {"model": ""})
+        except (IpcError, RuntimeError, OSError) as e:
+            self._append(Static(f"[red]model error: {e}[/red]", classes="log-line"))
+            return
+        current = str(result.get("current_model", "?"))
+        available = [str(m) for m in result.get("available_models", [])]
+        self._model = current
+        self._update_footer()
+        if not available:
+            self._append(Static(
+                f"[bold]current model[/bold]  [cyan]{current}[/cyan]"
+                f"  [dim](no other models registered)[/dim]",
+                classes="log-line",
+            ))
+            return
+        if current not in available:
+            available = [current] + available
+        try:
+            self.query_one(ModelSelectWidget).remove()
+        except NoMatches:
+            pass
+        picker = ModelSelectWidget(available, current)
+        self.mount(picker, before="#prompt")
+        picker.focus()
+
+    # 模型选择器：确认切换
+    def on_model_select_widget_selected(self, event: ModelSelectWidget.Selected) -> None:
+        self._dismiss_model_select()
+        self.run_worker(self._do_set_model(event.model), name="set_model", exclusive=False)
+
+    # 模型选择器：取消
+    def on_model_select_widget_cancelled(self, event: ModelSelectWidget.Cancelled) -> None:
+        self._dismiss_model_select()
+
+    # 移除选择器并把焦点还给输入框
+    def _dismiss_model_select(self) -> None:
+        try:
+            self.query_one(ModelSelectWidget).remove()
+        except NoMatches:
+            pass
+        prompt = self._prompt()
+        if prompt is not None and not prompt.disabled:
+            prompt.focus()
+
+    # 查询或切换模型，结果直接打到日志区
+    async def _do_set_model(self, model: str) -> None:
+        if self._client is None:
+            self._append(Static("[yellow]disconnected[/yellow]", classes="log-line"))
+            return
+        try:
+            result = await self._client.send_command("session.set_model", {"model": model})
+        except (IpcError, RuntimeError, OSError) as e:
+            self._append(Static(f"[red]model error: {e}[/red]", classes="log-line"))
+            return
+        current = str(result.get("current_model", "?"))
+        available = [str(m) for m in result.get("available_models", [])]
+        self._model = current
+        self._update_footer()
+        prompt = self._prompt()
+        if prompt is not None and not prompt.disabled:
+            prompt.focus()
+        title = "model switched" if model else "current model"
+        suffix = f"  [dim]available: {', '.join(available)}[/dim]" if available else ""
+        self._append(Static(
+            f"[bold green]✓ {title}[/bold green]  [cyan]{current}[/cyan]{suffix}",
+            classes="log-line",
+        ))
 
     # 在 worker 中执行 IPC 发送，使 App 消息泵在 agent 运行期间仍能处理键盘/焦点等消息
     async def _do_send_message(self, content: str) -> None:
@@ -987,6 +1203,45 @@ class MaiTuiApp(App[None]):
         except Exception:
             return None
 
+    # 底部状态栏文案：模型 / 上下文占用 / 本次运行耗时
+    def _footer_status(self) -> str:
+        model = self._model or "no model"
+        pct = self._last_context_pct
+        filled = int(pct * 10)
+        if pct >= 0.85:
+            bar_color = "bold red"
+        elif pct >= 0.70:
+            bar_color = "yellow"
+        else:
+            bar_color = "#566074"
+        bar = f"[{bar_color}]{'█' * filled}{'░' * (10 - filled)}[/{bar_color}]"
+        if self._ctx_window:
+            ctx = (
+                f"[dim]{_fmt_tokens(self._ctx_tokens)}/{_fmt_tokens(self._ctx_window)}"
+                f"[/dim] {bar} [dim]{pct * 100:.0f}%[/dim]"
+            )
+        elif pct > 0:
+            ctx = f"{bar} [dim]{pct * 100:.0f}%[/dim]"
+        else:
+            ctx = "[dim]ctx —[/dim]"
+        timer = ""
+        if self._busy and self._run_started_at is not None:
+            elapsed = int(time.monotonic() - self._run_started_at)
+            m, s = divmod(elapsed, 60)
+            timer = f" │ [cyan]⏱ {m}m{s:02d}s[/cyan]" if m else f" │ [cyan]⏱ {s}s[/cyan]"
+        elif self._last_run_elapsed is not None:
+            elapsed = int(self._last_run_elapsed)
+            m, s = divmod(elapsed, 60)
+            timer = f" │ [dim]○ {m}m{s:02d}s[/dim]" if m else f" │ [dim]○ {s}s[/dim]"
+        return f"[#8fb7e8]✳[/#8fb7e8] [bold #eef3fb]{model}[/bold #eef3fb] │ {ctx}{timer}"
+
+    # 刷新底部状态栏（由 1s 定时器和关键事件驱动）
+    def _update_footer(self) -> None:
+        try:
+            self.query_one("#footer-left", Label).update(self._footer_status())
+        except NoMatches:
+            return
+
     # 生成 context 占用率的彩色进度条字符串
     def _render_ctx_bar(self, pct: float) -> str:
         filled = int(pct * 20)
@@ -1006,7 +1261,6 @@ class MaiTuiApp(App[None]):
             header = self.query_one("#header", Label)
         except NoMatches:
             return
-        session = f"  [dim]{self._session_id}[/dim]" if self._session_id else ""
         color = {
             "ready": "#79d6a5",
             "running": "#f2c36b",
@@ -1015,8 +1269,7 @@ class MaiTuiApp(App[None]):
         }.get(state, "dim")
         header.update(
             f"[bold #eef3fb]MAI-CODE[/bold #eef3fb]  "
-            f"[#8fb7e8]◆[/#8fb7e8] [dim]{self._host}:{self._port}[/dim]"
-            f"{session}  [{color}]{state}[/{color}]"
+            f"[{color}]● {state}[/{color}]"
         )
 
     # 管理 SocketClient 生命周期：连接、订阅事件、断线重连
@@ -1056,8 +1309,7 @@ class MaiTuiApp(App[None]):
                         "run.*",
                         "step.*",
                         "tool.*",
-                        "llm.token",
-                        "llm.usage",
+                        "llm.*",
                         "log.*",
                         "permission.*",
                         "context.*",
@@ -1072,6 +1324,15 @@ class MaiTuiApp(App[None]):
                 created = await client.send_command("session.create", {"mode": "chat"})
                 self._session_id = str(created["session_id"])
                 log.info("session created session_id=%s", self._session_id)
+                # 启动即查询当前模型，footer 不再显示 no model
+                try:
+                    info = await client.send_command("session.set_model", {"model": ""})
+                    model = str(info.get("current_model") or "")
+                    if model:
+                        self._model = model
+                        self._update_footer()
+                except (IpcError, RuntimeError, OSError):
+                    pass
                 prompt = self._prompt()
                 if prompt is not None:
                     prompt.disabled = False
@@ -1140,12 +1401,12 @@ class MaiTuiApp(App[None]):
             self._update_header("disconnected")
 
         elif t == "run.started":
-            run_id = event.get("run_id", "")
             goal = event.get("goal", "")
-            self._append(Static(
-                f"[dim]run[/dim]  [cyan]{run_id}[/cyan]  [dim]{_preview(goal, 96)}[/dim]",
-                classes="run-header",
-            ))
+            self._run_started_at = time.monotonic()
+            self._last_run_elapsed = None
+            self._update_footer()
+            if goal:
+                self._append(Static(f"[dim]▸ {_preview(goal, 88)}[/dim]", classes="run-header"))
 
         elif t == "skill.invoked":
             skill_name = event.get("skill_name", "")
@@ -1224,6 +1485,9 @@ class MaiTuiApp(App[None]):
                 tc_done.set_result(error_msg, elapsed_ms, is_error=True)
 
         elif t == "run.finished":
+            if self._run_started_at is not None:
+                self._last_run_elapsed = time.monotonic() - self._run_started_at
+            self._update_footer()
             status = event.get("status", "")
             steps = event.get("steps", 0)
             reason = event.get("reason") or ""
@@ -1239,19 +1503,25 @@ class MaiTuiApp(App[None]):
                     classes="run-err",
                 ))
 
+        elif t == "llm.model_selected":
+            model = event.get("model", "")
+            if model:
+                self._model = model
+                self._update_footer()
+
         elif t == "llm.usage":
             run_id = event.get("run_id", "")
             if run_id in self._subagent_run_ids:
                 return
             pct = float(event.get("context_pct") or 0.0)
             self._last_context_pct = pct
-            ctx_bar = self._render_ctx_bar(pct)
+            self._ctx_tokens = int(event.get("context_tokens") or 0)
+            self._ctx_window = int(event.get("context_window") or 0)
+            self._update_footer()
+            if pct < 0.70:
+                return
             self._append(Static(
-                f"[dim]  tokens  "
-                f"in={event.get('input_tokens')} "
-                f"out={event.get('output_tokens')} "
-                f"cache={event.get('cache_read_input_tokens')}[/dim]"
-                f"  {ctx_bar}",
+                f"[dim]ctx {pct * 100:.0f}%[/dim]  {self._render_ctx_bar(pct)}",
                 classes="usage",
             ))
 
@@ -1259,6 +1529,7 @@ class MaiTuiApp(App[None]):
             orig = event.get("original_tokens", 0)
             summary = event.get("summary_tokens", 0)
             self._last_context_pct = 0.0
+            self._ctx_tokens = 0
             self._append(Static(
                 f"[bold cyan]⚡ Context compacted[/bold cyan]"
                 f"  [dim]original≈{orig} tokens → summary={summary} tokens[/dim]",

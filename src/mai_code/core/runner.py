@@ -189,7 +189,9 @@ class AgentRunner:
             cancelled = False
             try:
                 provider: LLMProvider = self._provider or AnthropicProvider(
-                    self._config.llm.default_model
+                    self._config.llm.default_model,
+                    base_url=self._config.llm.base_url or None,
+                    api_key=self._config.llm.api_key or None,
                 )
                 if self._trace is not None:
                     provider = TracingProvider(

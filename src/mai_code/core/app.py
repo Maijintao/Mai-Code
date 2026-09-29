@@ -5,6 +5,8 @@ import datetime
 import fnmatch
 import json
 import logging
+import os
+import re
 import signal
 import sys
 import time
@@ -14,6 +16,8 @@ from typing import Any
 
 from pydantic import BaseModel
 
+import anthropic
+import httpx
 import mai_code
 from mai_code.core.bus.commands import (
     AgentRunCommand,
@@ -33,6 +37,8 @@ from mai_code.core.bus.commands import (
     SessionGetHistoryResult,
     SessionSendMessageCommand,
     SessionSendMessageResult,
+    SessionSetModelCommand,
+    SessionSetModelResult,
 )
 from mai_code.core.bus.envelope import EventPushEnvelope
 from mai_code.core.config import MaiConfig, get_config
@@ -68,6 +74,7 @@ class CoreApp:
         self._sessions: SessionManager | None = None
         self._permission_manager: PermissionManager | None = None
         self._mcp_manager: McpServerManager | None = None
+        self._detected_models: list[str] | None = None  # 端点 /v1/models 探测缓存
 
     # 处理 core.ping 请求，返回服务版本、运行时长和接收时间
     async def _ping_handler(self, params: dict[str, Any]) -> PongResult:
@@ -147,6 +154,72 @@ class CoreApp:
         cmd = SessionCompactCommand.model_validate(params)
         result = await self._sessions.compact(cmd.session_id, cmd.focus)
         return result  # type: ignore[no-any-return]
+
+    # 查询或切换当前 LLM 模型（作用于后续所有 run）
+    async def _session_set_model_handler(self, params: dict[str, Any]) -> SessionSetModelResult:
+        assert self._config is not None
+        cmd = SessionSetModelCommand.model_validate(params)
+        if cmd.model:
+            self._config.llm.default_model = cmd.model
+            logger.info("default model switched to %s", cmd.model)
+        # 可切换模型优先取用户白名单（llm.models），否则探测端点 /v1/models，最后退回默认模型
+        if self._config.llm.models:
+            available = list(self._config.llm.models)
+        else:
+            detected = await self._detect_endpoint_models()
+            available = detected or [self._config.llm.default_model]
+        return SessionSetModelResult(
+            current_model=self._config.llm.default_model,
+            available_models=available,
+        )
+
+    # 探测端点支持的模型列表，结果缓存。两种策略：
+    # 1) Anthropic SDK 的 /v1/models（官方端点与部分网关）
+    # 2) OpenAI 风格 GET {origin}/models、{origin}/v1/models（DeepSeek 等兼容网关）
+    # 全部失败返回空列表，调用方回退默认模型
+    async def _detect_endpoint_models(self) -> list[str]:
+        if self._detected_models is not None:
+            return self._detected_models
+        assert self._config is not None
+        llm = self._config.llm
+        base = (llm.base_url or os.environ.get("ANTHROPIC_BASE_URL") or "").rstrip("/")
+        key = (
+            llm.api_key
+            or os.environ.get("ANTHROPIC_API_KEY")
+            or os.environ.get("ANTHROPIC_AUTH_TOKEN")
+            or ""
+        )
+        models: list[str] = []
+        # 策略 1：Anthropic 风格
+        try:
+            kwargs: dict[str, Any] = {"api_key": key or "empty"}
+            if base:
+                kwargs["base_url"] = base
+            client = anthropic.AsyncAnthropic(**kwargs)
+            page = await asyncio.wait_for(client.models.list(), timeout=5.0)
+            models = sorted({m.id for m in page.data})
+        except Exception as e:
+            logger.info("anthropic /v1/models probe failed: %s", e)
+        # 策略 2：OpenAI 风格（两种响应都是 data[].id，解析一致）
+        if not models and base:
+            origin = re.sub(r"/anthropic$", "", base)
+            for url in (f"{origin}/models", f"{origin}/v1/models", f"{base}/v1/models"):
+                try:
+                    async with httpx.AsyncClient(timeout=5.0) as hc:
+                        resp = await hc.get(
+                            url,
+                            headers={"Authorization": f"Bearer {key}", "x-api-key": key},
+                        )
+                        resp.raise_for_status()
+                        ids = [str(m["id"]) for m in resp.json().get("data", []) if m.get("id")]
+                    if ids:
+                        models = sorted(set(ids))
+                        break
+                except Exception as e:
+                    logger.info("model probe %s failed: %s", url, e)
+        self._detected_models = models
+        logger.info("detected %d models from endpoint", len(models))
+        return self._detected_models
 
     # 关闭 session 并返回 closed 状态
     async def _session_close_handler(self, params: dict[str, Any]) -> SessionCloseResult:
@@ -234,7 +307,11 @@ class CoreApp:
         sessions_root = Path("~/.mai/sessions").expanduser()
         store = SessionStore(sessions_root)
         assert self._config is not None
-        compact_provider = AnthropicProvider(self._config.llm.default_model)
+        compact_provider = AnthropicProvider(
+            self._config.llm.default_model,
+            base_url=self._config.llm.base_url or None,
+            api_key=self._config.llm.api_key or None,
+        )
 
         self._mcp_manager = McpServerManager()
         if self._config.mcp.servers:
@@ -269,6 +346,7 @@ class CoreApp:
         server.register("session.close", self._session_close_handler)
         server.register("permission.respond", self._permission_respond_handler)
         server.register("session.compact", self._session_compact_handler)
+        server.register("session.set_model", self._session_set_model_handler)
 
         addr = await server.start()
         logger.info("mai-core %s listening addr=%s", mai_code.__version__, addr)

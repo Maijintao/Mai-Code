@@ -194,6 +194,7 @@ class WelcomePanel(Static):
                     yield Static("›  Type a goal and press Enter", classes="tip")
                     yield Static("›  Type / for skills and commands", classes="tip")
                     yield Static("›  Press Ctrl+Q to exit", classes="tip")
+                    yield Static("›  Press Ctrl+T to select and copy text", classes="tip")
                     yield Static("──────  Recent activity", classes="activity-rule")
                     yield Static("No recent activity", classes="activity-empty")
             with Vertical(id="welcome-meta"):
@@ -802,6 +803,7 @@ class MaiTuiApp(App[None]):
     TITLE = "MaiCode"
     BINDINGS = [
         Binding("ctrl+q", "quit", "quit"),
+        Binding("ctrl+t", "toggle_select_mode", "select"),
     ]
     CSS = """
     Screen { background: #07090e; }
@@ -884,6 +886,7 @@ class MaiTuiApp(App[None]):
         self._pending_permission_blocks: dict[str, PermissionBlock] = {}
         self._session_id: str | None = None
         self._busy = False
+        self._select_mode = False  # True = 关闭鼠标捕获，终端原生拖选/复制
         self._last_context_pct: float = 0.0
         self._model: str | None = None
         self._ctx_tokens: int = 0
@@ -912,8 +915,20 @@ class MaiTuiApp(App[None]):
             id="footer",
         )
 
+    # 不捕获鼠标（与 Codex/Claude Code 一致）：终端原生拖选/复制始终可用。
+    # 代价是滚轮事件收不到，翻页用 PgUp/PgDn / 方向键。
+    def _disable_mouse_capture(self) -> None:
+        driver = self._driver
+        if driver is None:
+            return
+        try:
+            driver._disable_mouse_support()
+        except (AttributeError, OSError):
+            pass
+
     def on_mount(self) -> None:
         self._slash_items = self._build_slash_items()
+        self._disable_mouse_capture()
         self._append(WelcomePanel())
         self.set_interval(1.0, self._update_footer)
         self.run_worker(self._socket_loop(), exclusive=True, name="socket")
@@ -1261,16 +1276,34 @@ class MaiTuiApp(App[None]):
             header = self.query_one("#header", Label)
         except NoMatches:
             return
+        self._header_state = state
         color = {
             "ready": "#79d6a5",
             "running": "#f2c36b",
             "disconnected": "#e57f8a",
             "connecting": "#94a3b8",
         }.get(state, "dim")
+        mode = "  [dim]│[/dim]  [#8fb7e8]\u2b1a select mode[/#8fb7e8]" if self._select_mode else ""
         header.update(
             f"[bold #eef3fb]MAI-CODE[/bold #eef3fb]  "
-            f"[{color}]● {state}[/{color}]"
+            f"[{color}]● {state}[/{color}]{mode}"
         )
+
+    # 切换选择模式：关闭鼠标捕获后，终端原生拖选/复制（Cmd+C）即可用；滚轮滚动暂时失效
+    def action_toggle_select_mode(self) -> None:
+        driver = self._driver
+        if driver is None:
+            return
+        try:
+            if self._select_mode:
+                driver._enable_mouse_support()
+                self._select_mode = False
+            else:
+                driver._disable_mouse_support()
+                self._select_mode = True
+        except (AttributeError, OSError):
+            return
+        self._update_header(getattr(self, "_header_state", "disconnected"))
 
     # 管理 SocketClient 生命周期：连接、订阅事件、断线重连
     async def _socket_loop(self) -> None:

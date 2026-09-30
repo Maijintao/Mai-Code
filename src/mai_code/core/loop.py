@@ -19,6 +19,14 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+# 主 agent 默认系统提示词（runner 会传入带产品身份的版本覆盖它）
+_DEFAULT_BASE_SYSTEM_PROMPT = (
+    "You are a helpful AI assistant. "
+    "Use the available tools to complete the user's goal. "
+    "When the goal is fully achieved, respond with a final answer "
+    "and do not call any more tools."
+)
+
 def _now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -35,6 +43,7 @@ class AgentLoop:
         compactor: Compactor | None = None,
         compact_threshold: float = 0.80,
         session_id: str = "",
+        base_system_prompt: str | None = None,
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -43,6 +52,7 @@ class AgentLoop:
         self._compactor = compactor
         self._compact_threshold = compact_threshold
         self._session_id = session_id
+        self._base_system_prompt = base_system_prompt
 
     # 驱动 plan→act→observe 循环直到上下文终止；CancelledError 向上传播
     async def run(self, context: ExecutionContext) -> None:
@@ -61,10 +71,7 @@ class AgentLoop:
                     run_id=context.run_id,
                     step=context.step,
                     system=context.system_prompt(
-                        "You are a helpful AI assistant. "
-                        "Use the available tools to complete the user's goal. "
-                        "When the goal is fully achieved, respond with a final answer "
-                        "and do not call any more tools."
+                        self._base_system_prompt or _DEFAULT_BASE_SYSTEM_PROMPT
                     ),
                 )
             except asyncio.CancelledError:

@@ -13,6 +13,12 @@
 - 上下文快爆了，不是粗暴截断，而是有水位检测和 compact 压缩
 - 复杂任务可以交给子 Agent（Subagents），外部工具通过 MCP 接入
 
+## 效果预览
+
+![Mai-Code TUI](assets/tui-demo.png)
+
+*`mai-tui` 运行效果：像素吉祥物 Welcome 面板、斜杠命令补全、底部模型 / 上下文 / 用时状态栏*
+
 ## 安装与快速开始
 
 ### macOS / Linux（一条命令）

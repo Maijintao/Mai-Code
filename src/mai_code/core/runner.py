@@ -222,12 +222,26 @@ class AgentRunner:
                     else run_path
                 )
                 compactor = Compactor(bus, session_dir, session_id_str)
+                # 身份注入：产品名是 Mai-Code，底层模型如实告知，避免模型自报"我是 Claude"
+                base_prompt = (
+                    f"You are Mai-Code, a local CLI coding agent running in the user's terminal. "
+                    f"The underlying model powering you is {self._config.llm.default_model}.\n"
+                    "Identity rules:\n"
+                    "- Your product name is Mai-Code. You are NOT Claude, ChatGPT, or any other assistant.\n"
+                    "- Never claim to be built by Anthropic or OpenAI.\n"
+                    "- If asked who you are, answer that you are Mai-Code. "
+                    "If asked what model powers you, answer with the model name above honestly.\n\n"
+                    "Use the available tools to complete the user's goal. "
+                    "When the goal is fully achieved, respond with a final answer "
+                    "and do not call any more tools."
+                )
                 loop = AgentLoop(
                     provider, registry, bus,
                     permission_manager=self._permission_manager,
                     compactor=compactor,
                     compact_threshold=self._config.compaction.auto_threshold,
                     session_id=session_id_str,
+                    base_system_prompt=base_prompt,
                 )
                 await loop.run(context)
             except asyncio.CancelledError:

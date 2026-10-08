@@ -91,6 +91,7 @@ class LlmConfig:
     models: list[str] = field(default_factory=list)  # 可切换的模型白名单；空 = 自动探测
     base_url: str = ""  # Anthropic 兼容端点；空 = 官方默认
     api_key: str = ""  # 空 = 用 ANTHROPIC_API_KEY 环境变量
+    context_window: int = 0  # 上下文窗口 token 数；0 = 按内置模型表推断，未知模型回退 200k
     router: str = "static"  # "static" | "rule_based" (S4) | "cost_budget" (S6)
 
 
@@ -228,10 +229,15 @@ def _apply_toml(config: MaiConfig, data: dict[str, Any]) -> None:
         if not isinstance(llm, dict):
             raise SystemExit("Config error: [llm] must be a table")
         unknown_llm: set[str] = set(llm.keys()) - {
-            "default_model", "models", "router", "base_url", "api_key",
+            "default_model", "models", "router", "base_url", "api_key", "context_window",
         }
         if unknown_llm:
             raise SystemExit(f"Unknown [llm] keys: {', '.join(sorted(unknown_llm))}")
+        if "context_window" in llm:
+            val = llm["context_window"]
+            if not isinstance(val, int) or isinstance(val, bool) or val < 0:
+                raise SystemExit("Config error: llm.context_window must be a non-negative integer")
+            config.llm.context_window = val
         if "default_model" in llm:
             val = llm["default_model"]
             if not isinstance(val, str):
@@ -420,6 +426,17 @@ def _apply_env(config: MaiConfig) -> None:
     api_key_env = os.environ.get("MAI_LLM_API_KEY")
     if api_key_env is not None:
         config.llm.api_key = api_key_env.strip()
+
+    ctx_env = os.environ.get("MAI_LLM_CONTEXT_WINDOW")
+    if ctx_env is not None:
+        try:
+            config.llm.context_window = int(ctx_env)
+        except ValueError:
+            raise SystemExit(
+                f"Config error: MAI_LLM_CONTEXT_WINDOW must be an integer, got: {ctx_env!r}"
+            ) from None
+        if config.llm.context_window < 0:
+            raise SystemExit("Config error: MAI_LLM_CONTEXT_WINDOW must be >= 0")
 
     trace_enabled = os.environ.get("MAI_TRACE_ENABLED")
     if trace_enabled is not None:

@@ -44,7 +44,7 @@ from mai_code.core.bus.commands import (
 from mai_code.core.bus.envelope import EventPushEnvelope
 from mai_code.core.config import MaiConfig, get_config, update_llm_toml
 from mai_code.core.events.bus import EventBus
-from mai_code.core.llm.probe import detect_endpoint_models
+from mai_code.core.llm.probe import detect_endpoint_context_window, detect_endpoint_models
 from mai_code.core.llm.provider import AnthropicProvider
 from mai_code.core.logging_setup import setup_logging
 from mai_code.core.mcp.server import McpServerManager
@@ -77,6 +77,8 @@ class CoreApp:
         self._permission_manager: PermissionManager | None = None
         self._mcp_manager: McpServerManager | None = None
         self._detected_models: list[str] | None = None  # 端点 /v1/models 探测缓存
+        self._context_window_from_probe = False  # context_window 来自探测而非用户显式配置
+        self._probe_task: asyncio.Task[None] | None = None
 
     # 处理 core.ping 请求，返回服务版本、运行时长和接收时间
     async def _ping_handler(self, params: dict[str, Any]) -> PongResult:
@@ -184,6 +186,21 @@ class CoreApp:
         self._detected_models = await detect_endpoint_models(llm.base_url, llm.api_key)
         return self._detected_models
 
+    # 后台探测端点上下文窗口：/models 带 window 字段的网关自动生效；用户显式配置时不覆盖
+    async def _probe_context_window_task(self) -> None:
+        assert self._config is not None
+        try:
+            if self._config.llm.context_window > 0:
+                return
+            llm = self._config.llm
+            window = await detect_endpoint_context_window(llm.base_url, llm.api_key)
+            if window > 0:
+                self._config.llm.context_window = window
+                self._context_window_from_probe = True
+                logger.info("context window detected from endpoint: %d", window)
+        except Exception:
+            logger.exception("context window probe failed")
+
     # 关闭 session 并返回 closed 状态
     async def _session_close_handler(self, params: dict[str, Any]) -> SessionCloseResult:
         assert self._sessions is not None
@@ -217,6 +234,12 @@ class CoreApp:
         llm.default_model = default_model
         self._detected_models = None  # 端点变了，模型探测缓存失效
 
+        # 端点变更后作废探测来的 context window 并重新探测；用户显式配置的值不动
+        if self._context_window_from_probe:
+            self._context_window_from_probe = False
+            llm.context_window = 0
+        self._probe_task = asyncio.create_task(self._probe_context_window_task())
+
         # 压缩用 provider 是启动时构建的，同步替换保证 /compact 与新配置一致
         if self._sessions is not None:
             self._sessions.set_provider(
@@ -224,6 +247,7 @@ class CoreApp:
                     default_model,
                     base_url=base_url or None,
                     api_key=api_key or None,
+                    context_window=self._config.llm.context_window,
                 )
             )
 
@@ -324,6 +348,7 @@ class CoreApp:
             self._config.llm.default_model,
             base_url=self._config.llm.base_url or None,
             api_key=self._config.llm.api_key or None,
+            context_window=self._config.llm.context_window,
         )
 
         self._mcp_manager = McpServerManager()
@@ -366,6 +391,9 @@ class CoreApp:
         addr = await server.start()
         logger.info("mai-core %s listening addr=%s", mai_code.__version__, addr)
         logger.info("config: %s", self._config)
+
+        # 启动后后台探测一次端点上下文窗口，成功则自动写入运行配置
+        self._probe_task = asyncio.create_task(self._probe_context_window_task())
 
         loop = asyncio.get_running_loop()
         shutdown = asyncio.Event()

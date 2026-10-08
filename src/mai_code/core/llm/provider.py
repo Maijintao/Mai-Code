@@ -58,6 +58,7 @@ class AnthropicProvider:
         *,
         base_url: str | None = None,
         api_key: str | None = None,
+        context_window: int = 0,
     ) -> None:
         if client is None:
             key = api_key or os.environ.get("ANTHROPIC_API_KEY")
@@ -70,6 +71,13 @@ class AnthropicProvider:
         else:
             self._client = client
         self._model = model
+        self._context_window_override = context_window
+
+    # 返回本模型 context window：显式配置（>0）优先，其次内置模型表，未知模型回退 200k
+    def _ctx_window(self) -> int:
+        if self._context_window_override > 0:
+            return self._context_window_override
+        return _context_window(self._model)
 
     # 流式调用 Anthropic API，逐 token 发布事件并返回 LlmResponse；网络中断时自动重试
     async def chat(
@@ -142,7 +150,7 @@ class AnthropicProvider:
         usage = final_message.usage
         cache_read: int = getattr(usage, "cache_read_input_tokens", 0) or 0
         cache_create: int = getattr(usage, "cache_creation_input_tokens", 0) or 0
-        context_pct = usage.input_tokens / _context_window(self._model)
+        context_pct = usage.input_tokens / self._ctx_window()
 
         await bus.publish(
             LlmUsageEvent(
@@ -153,7 +161,7 @@ class AnthropicProvider:
                 cache_creation_input_tokens=cache_create,
                 context_pct=context_pct,
                 context_tokens=usage.input_tokens + cache_read + cache_create,
-                context_window=_context_window(self._model),
+                context_window=self._ctx_window(),
                 model=self._model,
                 ts=_now(),
             )

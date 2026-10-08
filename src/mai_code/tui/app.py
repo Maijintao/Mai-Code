@@ -16,7 +16,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.message import Message
 from textual.widget import Widget
-from textual.widgets import Label, Static, TextArea
+from textual.widgets import Input, Label, Static, TextArea
 
 from mai_code.core.config import MaiConfig
 from mai_code.core.skills.loader import SkillLoader
@@ -195,6 +195,7 @@ class WelcomePanel(Static):
                     yield Static("›  Type / for skills and commands", classes="tip")
                     yield Static("›  Press Ctrl+Q to exit", classes="tip")
                     yield Static("›  Press Ctrl+T to select and copy text", classes="tip")
+                    yield Static("›  Press Ctrl+O to configure endpoint", classes="tip")
                     yield Static("──────  Recent activity", classes="activity-rule")
                     yield Static("No recent activity", classes="activity-empty")
             with Vertical(id="welcome-meta"):
@@ -687,6 +688,102 @@ class ModelSelectWidget(Static):
             self.post_message(self.Cancelled())
 
 
+class SettingsPanel(Static):
+    """端点设置面板：Ctrl+O 呼出，修改 base_url / api_key / 默认模型，保存后持久化并热生效。"""
+
+    DEFAULT_CSS = """
+    SettingsPanel {
+        height: auto;
+        padding: 1 2;
+        margin: 0 2 1 2;
+        border: round #4d83e8;
+        background: #0b1930;
+        color: #dbeafe;
+    }
+    SettingsPanel Input {
+        height: 1;
+        border: none;
+        background: transparent;
+        padding: 0;
+        color: #e6ebf3;
+    }
+    SettingsPanel Input:focus {
+        border: none;
+        background: #1d3461;
+    }
+    SettingsPanel .field-label {
+        height: 1;
+        color: #8fb7e8;
+    }
+    SettingsPanel .hint {
+        margin-top: 1;
+        color: #566074;
+    }
+    """
+
+    # 用户在面板中保存设置时发布，携带三项输入值
+    class Saved(Message):
+        def __init__(self, panel: SettingsPanel, base_url: str, api_key: str, model: str) -> None:
+            self.panel = panel
+            self.base_url = base_url
+            self.api_key = api_key
+            self.model = model
+            super().__init__()
+
+    class Cancelled(Message):
+        pass
+
+    # 初始化面板，携带当前端点配置（key 只传是否已设置，不回显明文）
+    def __init__(self, base_url: str, model: str, has_key: bool) -> None:
+        super().__init__("")
+        self._initial = (base_url, model, has_key)
+
+    def compose(self) -> ComposeResult:
+        base_url, model, has_key = self._initial
+        key_hint = "  [dim](留空 = 保留已配置的 key)[/dim]" if has_key else ""
+        yield Static("[bold]endpoint settings[/bold]", classes="field-label")
+        yield Label(
+            "base_url  [dim](Anthropic 兼容端点，如 https://api.deepseek.com/anthropic)[/dim]",
+            classes="field-label",
+        )
+        yield Input(
+            value=base_url,
+            placeholder="https://api.deepseek.com/anthropic",
+            id="set-base-url",
+        )
+        yield Label(f"api_key{key_hint}", classes="field-label")
+        yield Input(value="", placeholder="sk-...", password=True, id="set-api-key")
+        yield Label("default_model", classes="field-label")
+        yield Input(value=model, placeholder="deepseek-chat", id="set-model")
+        yield Static("[dim]enter 下一项 · 最后一项 enter 保存 · esc 取消[/dim]", classes="hint")
+
+    def on_mount(self) -> None:
+        self.query_one("#set-base-url", Input).focus()
+
+    # enter 逐项下移，最后一项保存
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        event.stop()
+        if event.input.id == "set-base-url":
+            self.query_one("#set-api-key", Input).focus()
+        elif event.input.id == "set-api-key":
+            self.query_one("#set-model", Input).focus()
+        else:
+            self._submit()
+
+    # esc 取消（Input 不消费 escape，事件冒泡到面板）
+    def on_key(self, event: events.Key) -> None:
+        if event.key == "escape":
+            event.stop()
+            self.post_message(self.Cancelled())
+
+    # 汇总三项输入并发布保存消息
+    def _submit(self) -> None:
+        base_url = self.query_one("#set-base-url", Input).value.strip()
+        api_key = self.query_one("#set-api-key", Input).value.strip()
+        model = self.query_one("#set-model", Input).value.strip()
+        self.post_message(self.Saved(self, base_url, api_key, model))
+
+
 class ChatTextArea(TextArea):
     """支持 Enter 提交、Cmd/Shift/Alt+Enter 换行的多行聊天输入框。"""
 
@@ -804,6 +901,7 @@ class MaiTuiApp(App[None]):
     BINDINGS = [
         Binding("ctrl+q", "quit", "quit"),
         Binding("ctrl+t", "toggle_select_mode", "select"),
+        Binding("ctrl+o", "open_settings", "settings"),
     ]
     CSS = """
     Screen { background: #07090e; }
@@ -941,6 +1039,7 @@ class MaiTuiApp(App[None]):
         items: list[tuple[str, str]] = [
             ("compact", "compress context window"),
             ("model", "show or switch LLM model"),
+            ("settings", "configure LLM endpoint / api key (Ctrl+O)"),
         ]
         try:
             loader = SkillLoader()
@@ -1038,6 +1137,11 @@ class MaiTuiApp(App[None]):
                 self.run_worker(self._do_set_model(arg), name="set_model", exclusive=False)
             else:
                 self.run_worker(self._do_open_model_picker(), name="model_picker", exclusive=False)
+            return
+        # 检测 /settings 指令：呼出端点设置面板
+        if parts[0] == "/settings":
+            event.text_area.text = ""
+            self.action_open_settings()
             return
         if self._client is None or self._session_id is None or self._busy:
             self._append(Static("[yellow]agent busy or disconnected[/yellow]", classes="log-line"))
@@ -1145,6 +1249,72 @@ class MaiTuiApp(App[None]):
         suffix = f"  [dim]available: {', '.join(available)}[/dim]" if available else ""
         self._append(Static(
             f"[bold green]✓ {title}[/bold green]  [cyan]{current}[/cyan]{suffix}",
+            classes="log-line",
+        ))
+
+    # Ctrl+O 或 /settings：拉取当前端点配置并呼出设置面板
+    def action_open_settings(self) -> None:
+        if self._client is None:
+            self._append(Static("[yellow]disconnected[/yellow]", classes="log-line"))
+            return
+        self.run_worker(self._do_open_settings(), name="open_settings", exclusive=False)
+
+    # 拉取当前配置并挂载设置面板（重复呼出时先移除旧面板）
+    async def _do_open_settings(self) -> None:
+        if self._client is None:
+            return
+        try:
+            result = await self._client.send_command("config.get_llm", {})
+        except (IpcError, RuntimeError, OSError) as e:
+            self._append(Static(f"[red]settings error: {e}[/red]", classes="log-line"))
+            return
+        self._dismiss_settings()
+        panel = SettingsPanel(
+            str(result.get("base_url", "")),
+            str(result.get("default_model", "")),
+            bool(result.get("has_api_key")),
+        )
+        self.mount(panel, before="#prompt")
+
+    # 移除设置面板并把焦点还给输入框
+    def _dismiss_settings(self) -> None:
+        try:
+            self.query_one(SettingsPanel).remove()
+        except NoMatches:
+            pass
+        prompt = self._prompt()
+        if prompt is not None and not prompt.disabled:
+            prompt.focus()
+
+    # 设置面板取消
+    def on_settings_panel_cancelled(self, event: SettingsPanel.Cancelled) -> None:
+        self._dismiss_settings()
+
+    # 设置面板保存：发送 config.set_llm（daemon 热更新并持久化），footer 模型随之刷新
+    async def on_settings_panel_saved(self, event: SettingsPanel.Saved) -> None:
+        if self._client is None:
+            self._dismiss_settings()
+            return
+        try:
+            result = await self._client.send_command(
+                "config.set_llm",
+                {
+                    "base_url": event.base_url,
+                    "api_key": event.api_key,
+                    "default_model": event.model,
+                },
+            )
+        except (IpcError, RuntimeError, OSError) as e:
+            self._append(Static(f"[red]settings error: {e}[/red]", classes="log-line"))
+            return
+        self._dismiss_settings()
+        self._model = str(result.get("default_model", self._model))
+        self._update_footer()
+        key_state = "set" if result.get("has_api_key") else "missing"
+        self._append(Static(
+            f"[bold green]✓ endpoint updated[/bold green]  "
+            f"[cyan]{result.get('base_url', '')}[/cyan]  "
+            f"[dim]model={result.get('default_model', '')}  key={key_state}[/dim]",
             classes="log-line",
         ))
 

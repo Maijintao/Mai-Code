@@ -20,6 +20,9 @@ import mai_code
 from mai_code.core.bus.commands import (
     AgentRunCommand,
     AgentRunResult,
+    ConfigGetLlmResult,
+    ConfigSetLlmCommand,
+    ConfigSetLlmResult,
     EventSubscribeCommand,
     EventSubscribeResult,
     PermissionRespondCommand,
@@ -39,7 +42,7 @@ from mai_code.core.bus.commands import (
     SessionSetModelResult,
 )
 from mai_code.core.bus.envelope import EventPushEnvelope
-from mai_code.core.config import MaiConfig, get_config
+from mai_code.core.config import MaiConfig, get_config, update_llm_toml
 from mai_code.core.events.bus import EventBus
 from mai_code.core.llm.probe import detect_endpoint_models
 from mai_code.core.llm.provider import AnthropicProvider
@@ -188,6 +191,56 @@ class CoreApp:
         await self._sessions.close(cmd.session_id)
         return SessionCloseResult(status="closed")
 
+    # 返回当前 LLM 端点配置（key 不回传明文，只回传是否已设置）
+    async def _config_get_llm_handler(self, params: dict[str, Any]) -> ConfigGetLlmResult:
+        assert self._config is not None
+        llm = self._config.llm
+        return ConfigGetLlmResult(
+            base_url=llm.base_url,
+            default_model=llm.default_model,
+            has_api_key=bool(llm.api_key),
+        )
+
+    # 运行时更新 LLM 端点配置：空值保留原值；立即影响后续 run，并持久化到 config.toml
+    async def _config_set_llm_handler(self, params: dict[str, Any]) -> ConfigSetLlmResult:
+        assert self._config is not None
+        cmd = ConfigSetLlmCommand.model_validate(params)
+        llm = self._config.llm
+        base_url = cmd.base_url.strip() or llm.base_url
+        api_key = cmd.api_key.strip() or llm.api_key
+        default_model = cmd.default_model.strip() or llm.default_model
+        if base_url and not base_url.startswith(("http://", "https://")):
+            base_url = f"https://{base_url}"
+
+        llm.base_url = base_url
+        llm.api_key = api_key
+        llm.default_model = default_model
+        self._detected_models = None  # 端点变了，模型探测缓存失效
+
+        # 压缩用 provider 是启动时构建的，同步替换保证 /compact 与新配置一致
+        if self._sessions is not None:
+            self._sessions.set_provider(
+                AnthropicProvider(
+                    default_model,
+                    base_url=base_url or None,
+                    api_key=api_key or None,
+                )
+            )
+
+        # 持久化：key 只在本次显式提供时写盘，避免把环境变量里的 key 意外落到 toml
+        entries: list[tuple[str, str]] = [
+            ("base_url", base_url),
+            ("default_model", default_model),
+        ]
+        if cmd.api_key.strip():
+            entries.append(("api_key", cmd.api_key.strip()))
+        update_llm_toml(entries)
+        logger.info("llm endpoint updated base_url=%s model=%s", base_url, default_model)
+        return ConfigSetLlmResult(
+            base_url=base_url,
+            default_model=default_model,
+            has_api_key=bool(api_key),
+        )
     # 注册客户端事件订阅，可选先回放 events.jsonl 历史再接收实时流
     async def _subscribe_handler(self, params: dict[str, Any]) -> EventSubscribeResult:
         cmd = EventSubscribeCommand.model_validate(params)
@@ -307,6 +360,8 @@ class CoreApp:
         server.register("permission.respond", self._permission_respond_handler)
         server.register("session.compact", self._session_compact_handler)
         server.register("session.set_model", self._session_set_model_handler)
+        server.register("config.get_llm", self._config_get_llm_handler)
+        server.register("config.set_llm", self._config_set_llm_handler)
 
         addr = await server.start()
         logger.info("mai-core %s listening addr=%s", mai_code.__version__, addr)

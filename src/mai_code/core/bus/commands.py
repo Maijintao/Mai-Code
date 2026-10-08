@@ -110,6 +110,29 @@ class SessionSetModelResult(BaseModel):
     available_models: list[str] = []
 
 
+class ConfigGetLlmCommand(BaseModel):
+    type: Literal["config.get_llm"] = "config.get_llm"
+
+
+class ConfigGetLlmResult(BaseModel):
+    base_url: str
+    default_model: str
+    has_api_key: bool  # key 不回传明文，只回传是否已设置
+
+
+class ConfigSetLlmCommand(BaseModel):
+    type: Literal["config.set_llm"] = "config.set_llm"
+    base_url: str = ""       # 空串 = 保留当前值
+    api_key: str = ""        # 空串 = 保留当前值
+    default_model: str = ""  # 空串 = 保留当前值
+
+
+class ConfigSetLlmResult(BaseModel):
+    base_url: str
+    default_model: str
+    has_api_key: bool
+
+
 # 根据 type 字段决定命令类型的判别联合
 Command = Annotated[
     PingCommand
@@ -121,6 +144,8 @@ Command = Annotated[
     | SessionCloseCommand
     | PermissionRespondCommand
     | SessionCompactCommand
-    | SessionSetModelCommand,
+    | SessionSetModelCommand
+    | ConfigGetLlmCommand
+    | ConfigSetLlmCommand,
     Discriminator("type"),
 ]

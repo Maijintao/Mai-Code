@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import tomllib
 from dataclasses import dataclass, field
@@ -17,6 +18,59 @@ _DEFAULT_CONFIG_PATH = "~/.mai/config.toml"
 _DEFAULT_MAX_STEPS = 20
 _DEFAULT_MODEL = "claude-sonnet-4-6"
 _DEFAULT_TRACE_FILE = "~/.mai/traces/daemon.jsonl"
+
+GLOBAL_CONFIG_PATH = Path(_DEFAULT_CONFIG_PATH).expanduser()
+
+
+# 将 [llm] 段写入 ~/.mai/config.toml：读取现有 [llm] 键值后覆盖指定项，其余段与其他键原样保留
+def update_llm_toml(entries: list[tuple[str, str]]) -> None:
+    # 读取现有 [llm] 段（若有），在其基础上覆盖，避免丢失 models / router 等未指定的键
+    existing: dict[str, Any] = {}
+    if GLOBAL_CONFIG_PATH.exists():
+        try:
+            with GLOBAL_CONFIG_PATH.open("rb") as f:
+                data = tomllib.load(f)
+            existing = dict(data.get("llm", {}))
+        except tomllib.TOMLDecodeError:
+            existing = {}
+    existing.update(dict(entries))
+
+    # TOML 值序列化：list 用数组字面量，标量分别处理，str 用 JSON 转义（与 TOML 基本字符串兼容）
+    def toml_value(v: Any) -> str:
+        if isinstance(v, list):
+            return "[" + ", ".join(json.dumps(str(x), ensure_ascii=False) for x in v) + "]"
+        if isinstance(v, bool):
+            return "true" if v else "false"
+        if isinstance(v, (int, float)):
+            return str(v)
+        return json.dumps(str(v), ensure_ascii=False)
+
+    new_block = ["[llm]"] + [f"{k} = {toml_value(v)}" for k, v in existing.items()]
+
+    lines = (
+        GLOBAL_CONFIG_PATH.read_text(encoding="utf-8").splitlines()
+        if GLOBAL_CONFIG_PATH.exists()
+        else []
+    )
+    out: list[str] = []
+    i, replaced = 0, False
+    while i < len(lines):
+        if lines[i].strip() == "[llm]":
+            i += 1
+            while i < len(lines) and not lines[i].lstrip().startswith("["):
+                i += 1
+            out.extend(new_block)
+            out.append("")
+            replaced = True
+            continue
+        out.append(lines[i])
+        i += 1
+    if not replaced:
+        if out and out[-1].strip():
+            out.append("")
+        out.extend(new_block)
+    GLOBAL_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    GLOBAL_CONFIG_PATH.write_text("\n".join(out).rstrip() + "\n", encoding="utf-8")
 
 
 @dataclass

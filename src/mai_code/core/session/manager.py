@@ -52,6 +52,10 @@ class SessionManager:
         self._locks: dict[str, asyncio.Lock] = {}
         self._skill_loader = SkillLoader()
 
+    # 运行时替换压缩用 LLM provider（端点 / 密钥热更新后调用，保证 /compact 与新配置一致）
+    def set_provider(self, provider: LLMProvider | None) -> None:
+        self._provider = provider
+
     # 创建新 session 并写入 meta.json
     async def create(self, mode: SessionMode, title: str = "") -> Session:
         sid = f"sess-{uuid.uuid4().hex[:12]}"

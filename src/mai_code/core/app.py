@@ -44,7 +44,11 @@ from mai_code.core.bus.commands import (
 from mai_code.core.bus.envelope import EventPushEnvelope
 from mai_code.core.config import MaiConfig, get_config, update_llm_toml
 from mai_code.core.events.bus import EventBus
-from mai_code.core.llm.probe import detect_endpoint_context_window, detect_endpoint_models
+from mai_code.core.llm.probe import (
+    detect_endpoint_context_window,
+    detect_endpoint_models,
+    detect_registry_context_window,
+)
 from mai_code.core.llm.provider import AnthropicProvider
 from mai_code.core.logging_setup import setup_logging
 from mai_code.core.mcp.server import McpServerManager
@@ -166,6 +170,11 @@ class CoreApp:
         if cmd.model:
             self._config.llm.default_model = cmd.model
             logger.info("default model switched to %s", cmd.model)
+            # 模型变了，探测来的 context window 不再适用，作废后重新解析
+            if self._context_window_from_probe:
+                self._context_window_from_probe = False
+                self._config.llm.context_window = 0
+            self._probe_task = asyncio.create_task(self._probe_context_window_task())
         # 可切换模型优先取用户白名单（llm.models），否则探测端点 /v1/models，最后退回默认模型
         if self._config.llm.models:
             available = list(self._config.llm.models)
@@ -186,18 +195,20 @@ class CoreApp:
         self._detected_models = await detect_endpoint_models(llm.base_url, llm.api_key)
         return self._detected_models
 
-    # 后台探测端点上下文窗口：/models 带 window 字段的网关自动生效；用户显式配置时不覆盖
+    # 后台解析上下文窗口：端点 /models 自带字段优先，其次公共模型注册表；用户显式配置时不覆盖
     async def _probe_context_window_task(self) -> None:
         assert self._config is not None
         try:
-            if self._config.llm.context_window > 0:
-                return
             llm = self._config.llm
+            if llm.context_window > 0:
+                return
             window = await detect_endpoint_context_window(llm.base_url, llm.api_key)
+            if window <= 0:
+                window = await detect_registry_context_window(llm.default_model)
             if window > 0:
-                self._config.llm.context_window = window
+                llm.context_window = window
                 self._context_window_from_probe = True
-                logger.info("context window detected from endpoint: %d", window)
+                logger.info("context window resolved: %d (model=%s)", window, llm.default_model)
         except Exception:
             logger.exception("context window probe failed")
 

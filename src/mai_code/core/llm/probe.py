@@ -113,3 +113,57 @@ async def detect_endpoint_context_window(base_url: str = "", api_key: str = "") 
     if best:
         logger.info("detected context window %d from endpoint", best)
     return best
+
+
+_MODELS_DEV_URL = "https://models.dev/api.json"
+_registry_cache: dict[str, int] | None = None
+
+
+# 拉取并解析公共模型注册表（models.dev），返回 模型id -> context window；进程内缓存
+async def _load_registry() -> dict[str, int]:
+    global _registry_cache
+    if _registry_cache is not None:
+        return _registry_cache
+    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as hc:
+        resp = await hc.get(_MODELS_DEV_URL)
+        resp.raise_for_status()
+        data = resp.json()
+    table: dict[str, int] = {}
+    for provider_entry in data.values():
+        models = provider_entry.get("models") if isinstance(provider_entry, dict) else None
+        if not isinstance(models, dict):
+            continue
+        for mid, info in models.items():
+            if not isinstance(info, dict):
+                continue
+            limit = info.get("limit")
+            cw = (limit or {}).get("context") if isinstance(limit, dict) else None
+            cw = cw or info.get("context_window")
+            if isinstance(cw, int) and not isinstance(cw, bool) and 0 < cw <= _MAX_PLAUSIBLE_WINDOW:
+                if cw > table.get(mid, 0):
+                    table[mid] = cw
+    _registry_cache = table
+    logger.info("model registry loaded: %d entries", len(table))
+    return table
+
+
+# 按模型名从公共注册表查询上下文窗口：精确匹配 → 去中转 "provider/" 前缀 → 逐级截尾缀，查不到返回 0
+async def detect_registry_context_window(model: str) -> int:
+    model = model.strip()
+    if not model:
+        return 0
+    table = await _load_registry()
+    if model in table:
+        return table[model]
+    # 中转常给模型加 "provider/" 前缀，如 "azure/gpt-5.6-sol"
+    matches = [cw for mid, cw in table.items() if mid.endswith("/" + model)]
+    if matches:
+        return max(matches)
+    # 最后逐级截掉自定义尾缀重试（如 "gpt-5.6-sol" → "gpt-5.6"），代价是可能命中同名系其他型号
+    base = model
+    while "-" in base:
+        base = base.rsplit("-", 1)[0]
+        if base in table:
+            logger.info("registry fallback matched trimmed model %r for %r", base, model)
+            return table[base]
+    return 0

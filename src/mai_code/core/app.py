@@ -5,7 +5,6 @@ import datetime
 import fnmatch
 import json
 import logging
-import os
 import signal
 import sys
 import time
@@ -15,7 +14,6 @@ from typing import Any
 
 from pydantic import BaseModel
 
-import anthropic
 import mai_code
 from mai_code.core.bus.commands import (
     AgentRunCommand,
@@ -28,6 +26,8 @@ from mai_code.core.bus.commands import (
     PermissionRespondCommand,
     PermissionRespondResult,
     PongResult,
+    ProbeLlmCommand,
+    ProbeLlmResult,
     SessionCloseCommand,
     SessionCloseResult,
     SessionCompactCommand,
@@ -229,6 +229,18 @@ class CoreApp:
             has_api_key=bool(llm.api_key),
         )
 
+    # 探测端点可用模型：空值回退当前配置；供桌面端设置面板的"验证"使用
+    async def _config_probe_llm_handler(self, params: dict[str, Any]) -> ProbeLlmResult:
+        assert self._config is not None
+        cmd = ProbeLlmCommand.model_validate(params)
+        llm = self._config.llm
+        base_url = cmd.base_url.strip() or llm.base_url
+        api_key = cmd.api_key.strip() or llm.api_key
+        if base_url and not base_url.startswith(("http://", "https://")):
+            base_url = f"https://{base_url}"
+        models = await detect_endpoint_models(base_url=base_url, api_key=api_key)
+        return ProbeLlmResult(base_url=base_url, models=models)
+
     # 运行时更新 LLM 端点配置：空值保留原值；立即影响后续 run，并持久化到 config.toml
     async def _config_set_llm_handler(self, params: dict[str, Any]) -> ConfigSetLlmResult:
         assert self._config is not None
@@ -398,6 +410,7 @@ class CoreApp:
         server.register("session.set_model", self._session_set_model_handler)
         server.register("config.get_llm", self._config_get_llm_handler)
         server.register("config.set_llm", self._config_set_llm_handler)
+        server.register("config.probe_llm", self._config_probe_llm_handler)
 
         addr = await server.start()
         logger.info("mai-core %s listening addr=%s", mai_code.__version__, addr)

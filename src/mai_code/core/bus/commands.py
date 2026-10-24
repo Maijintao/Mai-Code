@@ -133,6 +133,17 @@ class ConfigSetLlmResult(BaseModel):
     has_api_key: bool
 
 
+class ProbeLlmCommand(BaseModel):
+    type: Literal["config.probe_llm"] = "config.probe_llm"
+    base_url: str = ""  # 空串 = 使用当前配置
+    api_key: str = ""   # 空串 = 使用当前配置
+
+
+class ProbeLlmResult(BaseModel):
+    base_url: str
+    models: list[str] = []  # 探测失败时为空列表
+
+
 # 根据 type 字段决定命令类型的判别联合
 Command = Annotated[
     PingCommand
@@ -146,6 +157,7 @@ Command = Annotated[
     | SessionCompactCommand
     | SessionSetModelCommand
     | ConfigGetLlmCommand
-    | ConfigSetLlmCommand,
+    | ConfigSetLlmCommand
+    | ProbeLlmCommand,
     Discriminator("type"),
 ]

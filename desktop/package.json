@@ -1,0 +1,14 @@
+{
+  "name": "mai-desktop",
+  "productName": "Mai-Code",
+  "version": "0.1.0",
+  "description": "Mai-Code desktop client — Electron shell for the mai-core daemon",
+  "main": "main/main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^45.0.0"
+  }
+}

@@ -19,6 +19,14 @@
 
 *`mai-tui` 运行效果：像素吉祥物 Welcome 面板、斜杠命令补全、底部模型 / 上下文 / 用时状态栏*
 
+![Mai-Code 桌面端 · 深色](assets/desktop-dark.png)
+
+*桌面端（Electron）深色主题：工作区隔离、会话列表、流式回复、Step 徽标、右下角模型切换与上下文水位*
+
+![Mai-Code 桌面端 · 浅色](assets/desktop-light.png)
+
+*桌面端（Electron）浅色主题：同一套事件流渲染，深浅主题一键切换*
+
 ## 安装与快速开始
 
 ### macOS / Linux（一条命令）

@@ -8,9 +8,9 @@ const input = $("#input");
 const sendBtn = $("#sendBtn");
 const sessionList = $("#sessionList");
 const sessionTitle = $("#sessionTitle");
-const modelBadge = $("#modelBadge");
 const toastEl = $("#toast");
-const wsPopover = $("#wsPopover");
+
+const FOLDER_SVG = '<svg viewBox="0 0 16 16" width="13" height="13"><path fill="currentColor" d="M1.5 3.5A1.5 1.5 0 0 1 3 2h3.2c.4 0 .8.16 1.06.44L8.5 3.7h4.9A1.6 1.6 0 0 1 15 5.3v7.2a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 1 12.5v-9Zm2 .1v2.9h9.9V5.3a.1.1 0 0 0-.1-.1H8.2a.9.9 0 0 1-.64-.26L6.3 3.6H3.5a.1.1 0 0 0-.1.1Z"/></svg>';
 
 /* ---------- pixel brand (data lifted verbatim from the TUI) ---------- */
 
@@ -96,7 +96,6 @@ function pixelTitleSvg(text, pixel) {
 }
 
 $("#brand").innerHTML = pixelTitleSvg("MAI-CODE", 2.4);
-$("#newChatIcon").innerHTML = libraSvg(26);
 $("#heroIcon").innerHTML = libraSvg(96);
 
 /* ---------- persisted state ---------- */
@@ -122,7 +121,10 @@ const S = {
   ]),
   activeWsId: store.get("mai.activeWsId", "default"),
   sessionWs: store.get("mai.sessionWs", {}), // session_id -> workspace id
+  archived: store.get("mai.archived", []), // session ids hidden from the list
   sessions: [],
+  models: [], // available models for the current endpoint
+  currentModel: "—",
   currentSessionId: null,
   currentClosed: false,
   sending: false,
@@ -391,9 +393,11 @@ function handleEvent({ wsId, event }) {
       break;
     }
     case "llm.usage": {
-      modelBadge.textContent = ev.model || modelBadge.textContent;
-      const meter = $("#ctxMeter");
-      meter.classList.remove("hidden");
+      $("#ctxMeter").classList.remove("hidden");
+      if (ev.model) {
+        S.currentModel = ev.model;
+        $("#modelName").textContent = ev.model;
+      }
       let pct = ev.context_pct;
       if (pct > 1) pct = pct / 100;
       pct = Math.max(0, Math.min(1, pct || 0));
@@ -469,28 +473,87 @@ async function connectActiveWs() {
   }
   try {
     const llm = await request("config.get_llm", {});
-    modelBadge.textContent = llm.default_model || "—";
     $("#cfgBaseUrl").placeholder = llm.base_url || "https://api.deepseek.com/anthropic";
     $("#cfgModel").placeholder = llm.default_model || "deepseek-chat";
   } catch (_err) {
     /* best-effort */
   }
+  try {
+    await fetchModels();
+  } catch (_err) {
+    /* model list is best-effort; the chip falls back to the config default */
+  }
   return true;
 }
 
-/* ---------- workspaces UI ---------- */
+/* ---------- model switcher (session.set_model: "" queries, value switches) ---------- */
 
-function renderWorkspaceUI() {
-  const ws = activeWs();
-  $("#wsName").textContent = ws.name;
-  wsPopover.replaceChildren();
+async function fetchModels() {
+  const r = await request("session.set_model", { model: "" });
+  S.currentModel = r.current_model || "—";
+  S.models = r.available_models ?? [];
+  $("#modelName").textContent = S.currentModel;
+  return S.models;
+}
 
+async function setModel(name) {
+  try {
+    const r = await request("session.set_model", { model: name });
+    S.currentModel = r.current_model;
+    if (r.available_models?.length) S.models = r.available_models;
+    $("#modelName").textContent = S.currentModel;
+    $("#modelPopover").classList.add("hidden");
+    toast(`模型已切换为 ${S.currentModel}`);
+  } catch (err) {
+    toast(`切换失败: ${err.message}`);
+  }
+}
+
+function renderModelPopover() {
+  const pop = $("#modelPopover");
+  pop.replaceChildren();
+  if (!S.models.length) {
+    pop.append(el("div", "model-empty", "暂未获取到模型列表，可在设置里「验证并获取模型」"));
+    return;
+  }
+  for (const m of S.models) {
+    const item = el("div", `model-item ${m === S.currentModel ? "current" : ""}`);
+    item.append(el("span", "check", m === S.currentModel ? "✓" : ""));
+    item.append(el("span", "", m));
+    item.addEventListener("click", () => setModel(m));
+    pop.append(item);
+  }
+}
+
+$("#modelChip").addEventListener("click", async () => {
+  const pop = $("#modelPopover");
+  if (!pop.classList.contains("hidden")) {
+    pop.classList.add("hidden");
+    return;
+  }
+  if (!S.models.length) {
+    try {
+      await fetchModels();
+    } catch (_err) {
+      /* render the empty hint */
+    }
+  }
+  renderModelPopover();
+  pop.classList.remove("hidden");
+});
+
+/* ---------- projects (sidebar section) ---------- */
+
+function renderProjects() {
+  const list = $("#projectList");
+  list.replaceChildren();
   for (const w of S.workspaces) {
-    const item = el("div", `ws-item ${w.id === S.activeWsId ? "active" : ""}`);
+    const item = el("div", `project-item ${w.id === S.activeWsId ? "active" : ""}`);
+    const icon = el("span", "p-icon");
+    icon.innerHTML = FOLDER_SVG;
     const info = el("div", "info");
     info.append(el("div", "n", w.name));
-    info.append(el("div", "p", w.path || "仓库内置 · :7437"));
-    item.append(el("span", "avatar", w.name.slice(0, 1)), info);
+    item.append(icon, info);
     if (w.id !== "default") {
       const del = el("button", "del", "✕");
       del.title = "移除工作区";
@@ -500,27 +563,25 @@ function renderWorkspaceUI() {
       });
       item.append(del);
     }
-    item.addEventListener("click", () => {
-      wsPopover.classList.add("hidden");
-      switchWorkspace(w.id);
-    });
-    wsPopover.append(item);
+    item.title = w.path || "仓库内置工作区";
+    item.addEventListener("click", () => switchWorkspace(w.id));
+    list.append(item);
   }
+  const add = el("button", "project-add", "＋ 添加项目文件夹…");
+  add.addEventListener("click", addWorkspace);
+  list.append(add);
+}
 
-  const add = el("button", "ws-add", "＋ 添加项目文件夹…");
-  add.addEventListener("click", async () => {
-    wsPopover.classList.add("hidden");
-    const dir = await window.mai.pickFolder();
-    if (!dir) return;
-    const name = dir.split("/").filter(Boolean).pop() || dir;
-    const port = Math.max(...S.workspaces.map((w) => w.port)) + 1;
-    const w = { id: `ws-${uid()}`, name, path: dir, port };
-    S.workspaces.push(w);
-    store.set("mai.workspaces", S.workspaces);
-    renderWorkspaceUI();
-    switchWorkspace(w.id);
-  });
-  wsPopover.append(add);
+async function addWorkspace() {
+  const dir = await window.mai.pickFolder();
+  if (!dir) return;
+  const name = dir.split("/").filter(Boolean).pop() || dir;
+  const port = Math.max(...S.workspaces.map((w) => w.port)) + 1;
+  const w = { id: `ws-${uid()}`, name, path: dir, port };
+  S.workspaces.push(w);
+  store.set("mai.workspaces", S.workspaces);
+  renderProjects();
+  switchWorkspace(w.id);
 }
 
 function removeWorkspace(wsId) {
@@ -530,7 +591,7 @@ function removeWorkspace(wsId) {
   }
   S.workspaces = S.workspaces.filter((w) => w.id !== wsId);
   store.set("mai.workspaces", S.workspaces);
-  renderWorkspaceUI();
+  renderProjects();
 }
 
 async function switchWorkspace(wsId) {
@@ -542,8 +603,7 @@ async function switchWorkspace(wsId) {
   S.activeWsId = wsId;
   store.set("mai.activeWsId", wsId);
   resetStreamToEmpty();
-  renderWorkspaceUI();
-  renderSessions();
+  renderProjects();
   sessionTitle.textContent = "新对话";
   await connectActiveWs();
 }
@@ -563,7 +623,11 @@ function fmtTime(iso) {
 
 function renderSessions() {
   sessionList.replaceChildren();
-  const visible = S.sessions.filter((s) => (S.sessionWs[s.id] ?? "default") === S.activeWsId);
+  const visible = S.sessions.filter(
+    (s) =>
+      !S.archived.includes(s.id) &&
+      (S.sessionWs[s.id] ?? "default") === S.activeWsId,
+  );
   if (!visible.length) {
     sessionList.append(el("div", "side-label", "当前工作区还没有会话"));
     return;
@@ -578,10 +642,38 @@ function renderSessions() {
         s.status === "active" ? "进行中" : "已结束"),
       el("span", "", fmtTime(s.updatedAt)),
     );
+    const archiveBtn = el("button", "archive-btn", "归档");
+    archiveBtn.title = "从列表归档（隐藏）此会话";
+    archiveBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      archiveSession(s);
+    });
+    meta.append(archiveBtn);
     item.append(meta);
     item.addEventListener("click", () => openSession(s));
     sessionList.append(item);
   }
+}
+
+// Archive = hide locally (backend has no archive state). Sessions still open
+// on the daemon are closed first so nothing keeps running behind the scenes.
+async function archiveSession(s) {
+  if (s.id === S.currentSessionId && S.activeRuns.size) {
+    toast("这个会话还有任务在运行，结束后再归档");
+    return;
+  }
+  if (s.status === "active") {
+    try {
+      await request("session.close", { session_id: s.id });
+    } catch (_err) {
+      /* best-effort: still archive locally */
+    }
+  }
+  S.archived.push(s.id);
+  store.set("mai.archived", S.archived);
+  if (s.id === S.currentSessionId) resetStreamToEmpty();
+  renderSessions();
+  toast(`已归档「${s.title || "未命名会话"}」`);
 }
 
 async function refreshSessions() {
@@ -702,15 +794,33 @@ document.querySelectorAll(".chip").forEach((chip) => {
   });
 });
 
-/* ---------- workspace popover ---------- */
+/* ---------- sidebar resizer ---------- */
 
-$("#wsSwitcher").addEventListener("click", () => wsPopover.classList.toggle("hidden"));
+const resizer = $("#resizer");
+let draggingSidebar = false;
+
+resizer.addEventListener("pointerdown", (e) => {
+  draggingSidebar = true;
+  resizer.setPointerCapture(e.pointerId);
+  document.body.classList.add("resizing");
+});
+resizer.addEventListener("pointermove", (e) => {
+  if (!draggingSidebar) return;
+  const w = Math.max(200, Math.min(460, e.clientX));
+  document.documentElement.style.setProperty("--side-w", `${w}px`);
+});
+resizer.addEventListener("pointerup", () => {
+  draggingSidebar = false;
+  document.body.classList.remove("resizing");
+  store.set("mai.sidebarWidth", $("#sidebar").offsetWidth);
+});
+
+/* ---------- global click-away ---------- */
+
 document.addEventListener("click", (e) => {
-  if (!wsPopover.classList.contains("hidden")
-      && !wsPopover.contains(e.target)
-      && e.target !== $("#wsSwitcher")
-      && !$("#wsSwitcher").contains(e.target)) {
-    wsPopover.classList.add("hidden");
+  const pop = $("#modelPopover");
+  if (!pop.classList.contains("hidden") && !e.target.closest(".model-anchor")) {
+    pop.classList.add("hidden");
   }
 });
 
@@ -738,7 +848,7 @@ $("#settingsBtn").addEventListener("click", async () => {
     const llm = await request("config.get_llm", {});
     $("#cfgBaseUrl").placeholder = llm.base_url || "https://api.deepseek.com/anthropic";
     $("#cfgModel").placeholder = llm.default_model || "deepseek-chat";
-    $("#cfgModel").value = llm.default_model || "";
+    $("#cfgModel").value = S.currentModel !== "—" ? S.currentModel : (llm.default_model || "");
   } catch (_err) {
     $("#cfgHint").textContent = "读取当前配置失败（daemon 未连接），保存将在连接后生效";
   }
@@ -798,7 +908,8 @@ $("#saveCfgBtn").addEventListener("click", async () => {
     });
     hint.className = "cfg-hint ok";
     hint.textContent = `✓ 已保存：${r.base_url} · ${r.default_model}`;
-    modelBadge.textContent = r.default_model || "—";
+    S.currentModel = r.default_model || S.currentModel;
+    $("#modelName").textContent = S.currentModel;
     $("#cfgApiKey").value = "";
     toast("配置已保存");
   } catch (err) {
@@ -811,11 +922,15 @@ $("#saveCfgBtn").addEventListener("click", async () => {
 
 async function boot() {
   applyTheme(new URLSearchParams(location.search).get("theme") || S.theme);
+  const savedWidth = store.get("mai.sidebarWidth", 0);
+  if (savedWidth >= 200 && savedWidth <= 460) {
+    document.documentElement.style.setProperty("--side-w", `${savedWidth}px`);
+  }
   window.mai.onEvent(handleEvent);
   window.mai.onStatus((st) => {
     if (st.wsId === S.activeWsId) setDaemonStatus(st);
   });
-  renderWorkspaceUI();
+  renderProjects();
 
   const ok = await connectActiveWs();
   refreshSessions();
